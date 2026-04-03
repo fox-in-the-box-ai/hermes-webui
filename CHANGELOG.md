@@ -5,6 +5,44 @@
 
 ---
 
+## [v0.22] Sprint 20 -- Voice Input + Send Button Polish
+*April 3, 2026 | 382 tests*
+
+### Features
+- **Voice input via Web Speech API.** Microphone button in the composer.
+  Tap to start recording, tap again (or send) to stop. Live interim
+  transcription appears in the textarea. Auto-stops after ~2s of silence.
+  Final text stays editable before sending. Appends to existing textarea
+  content rather than replacing it. Button hidden when browser doesn't
+  support Web Speech API. No API keys, no external libraries, no server
+  changes. Works in Chrome, Edge, Safari (partial). Firefox unsupported
+  (button stays hidden).
+- **Send button polish.** Send button redesigned as a 34px icon-only circle
+  with upward arrow SVG. Hidden by default — appears with pop-in spring
+  animation when textarea has content or files are attached. Disappears
+  on send or when content is cleared. Hidden while agent is responding.
+  Blue fill (#7cb9ff) with glow, scale hover/active for tactile feedback.
+
+### Architecture
+- Voice input IIFE in `boot.js`: SpeechRecognition lifecycle with
+  `continuous=false`, `interimResults=true`, error handling via `showToast()`.
+- `_prefix` variable snapshots existing textarea content on recording start
+  so dictation appends rather than overwrites.
+- `btnSend.onclick` stops active recognition before sending (send guard).
+- CSS: `.mic-btn`, `.mic-btn.recording` (red pulse), `.mic-status`,
+  `.mic-dot`, `@keyframes mic-pulse`.
+- `updateSendBtn()` in `ui.js` tracks textarea content, pending files,
+  and busy state. Hooked into `setBusy()`, `renderTray()`, `autoResize()`,
+  and input event listener.
+- CSS: `.send-btn` redesigned (circle, glow), `.send-btn.visible` +
+  `@keyframes send-pop-in` (spring animation).
+
+### Tests
+- 52 new tests in `test_sprint20.py`: voice input HTML, CSS, JS, append
+  behaviour, error handling, regressions. Total: **382 tests**.
+
+---
+
 ## [v0.21] Sprint 19 -- Auth + Security Hardening
 *April 3, 2026 | 328 tests*
 
@@ -676,4 +714,4 @@ Three-panel layout: sessions sidebar, chat area, workspace panel.
 
 ---
 
-*Last updated: v0.21, April 3, 2026 | Tests: 328*
+*Last updated: v0.22, April 3, 2026 | Tests: 382*

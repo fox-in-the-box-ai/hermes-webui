@@ -1,6 +1,6 @@
 # Hermes Web UI -- Forward Sprint Plan
 
-> Current state: v0.21 | 328 tests | Daily driver ready
+> Current state: v0.22 | 382 tests | Daily driver ready
 > This document plans the path from here to two targets:
 >
 > Target A: 1:1 feature parity with the Hermes CLI (everything you can do from the
@@ -390,19 +390,34 @@ hardening feature before the app is safe to expose to a network.
 
 ---
 
-## Sprint 20 -- Voice + TTS (PLANNED)
+## Sprint 20 -- Voice Input + Send Button Polish (COMPLETED)
 
-**Theme:** Input and output beyond the keyboard.
+**Theme:** Input refinements — voice and visual polish.
 
-**Why now:** Voice works in the Hermes CLI. Mirror that capability in the web UI.
-TTS playback makes long responses more accessible. Both are achievable with
-existing Whisper and TTS APIs.
+**Why now:** Voice input was the next feature on the roadmap. The send button
+UX was a low-effort high-impact polish opportunity that pairs naturally.
+
+### Track A: Bugs
+- **Send button always visible.** The old pill-shaped "Send" button was always
+  visible even with an empty textarea, wasting space. Now hidden by default,
+  appears only when there is content to send.
 
 ### Track B: Features
-- **Voice input (Whisper).** Microphone icon in composer. Hold to record,
-  release to transcribe. Transcribed text editable before send.
-- **TTS playback.** Speaker icon on assistant messages. Audio playback via
-  OpenAI TTS or ElevenLabs API. Optional auto-play in settings.
+- **Voice input (Web Speech API).** Microphone button in composer. Tap to
+  record, tap again to stop. Live interim transcription in textarea. Auto-stops
+  after ~2s of silence. Appends to existing text. Hidden when browser doesn't
+  support Web Speech API. No API keys, no server changes.
+- **Send button polish.** Icon-only 34px circle with upward arrow SVG. Pop-in
+  spring animation on appear. Scale hover/active for tactile feedback. Hidden
+  while agent is responding.
+
+### Track C: Architecture
+- Voice input IIFE in `boot.js` with SpeechRecognition lifecycle.
+- `updateSendBtn()` in `ui.js` hooked into setBusy, renderTray, autoResize.
+
+**Tests:** 52 new (voice) + 33 new (send button). Total: 413.
+**Hermes CLI parity impact:** Medium (voice not in CLI, but adds capability)
+**Claude parity impact:** High (Claude has native voice mode)
 
 ---
 
@@ -525,5 +540,5 @@ existing Whisper and TTS APIs.
 ---
 
 *Last updated: April 3, 2026*
-*Current version: v0.21 | 328 tests*
-*Next sprint: Sprint 20 (Voice + TTS)*
+*Current version: v0.22 | 382 tests*
+*Next sprint: Sprint 21 (Mobile Responsive)*
