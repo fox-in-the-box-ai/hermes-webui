@@ -1215,12 +1215,12 @@
         <div class="rank-badge silver">🥈</div>
         <div class="model-info">
           <h3>Qwen 3.5 27B</h3>
-          <div class="model-meta">Alibaba &middot; Apache 2.0 &middot; 800K context &middot; ~16 GB VRAM (Q4)</div>
-          <div class="model-why">Best coding benchmark of any model that fits on a 16 GB GPU — 72.4% SWE-bench Verified, which beats models twice its size. The 800K token context window handles large codebases in a single pass. Dual-mode: fast direct answers or slow chain-of-thought reasoning when you need it. Runs on an RTX 4080, M2/M3 Max, or any machine with 16 GB VRAM. Instruction-following (IFBench 76.5%) beats GPT-5.2. The pragmatic local pick for developers.</div>
+          <div class="model-meta">Alibaba &middot; Apache 2.0 &middot; 262K context &middot; ~17 GB VRAM (Q4)</div>
+          <div class="model-why">Best coding benchmark of any model that fits on a single consumer GPU — 72.4% SWE-bench Verified and 85.5% GPQA Diamond, beating cloud models twice its price. 262K native context (extensible further via YaRN) handles large codebases in a single pass. Dual-mode: fast direct answers or slow chain-of-thought reasoning when you need it. Runs on an RTX 4090 or M2/M3 Max with 24 GB VRAM. 95.0% on IFEval, which beats GPT-5-mini. Released February 2026, multimodal (text + vision), Apache 2.0. The pragmatic local pick for developers.</div>
           <div class="model-pills">
             <span class="pill gold">SWE 72.4%</span>
-            <span class="pill blue">800K context</span>
-            <span class="pill green">16 GB VRAM</span>
+            <span class="pill blue">262K context</span>
+            <span class="pill green">24 GB VRAM</span>
           </div>
         </div>
         <div class="model-score">
@@ -1234,12 +1234,12 @@
         <div class="rank-badge bronze">🥉</div>
         <div class="model-info">
           <h3>DeepSeek R1 32B (distill)</h3>
-          <div class="model-meta">DeepSeek &middot; MIT &middot; 128K context &middot; ~17 GB VRAM (Q4)</div>
-          <div class="model-why">The strongest reasoning model you can run on a single RTX 4090. This is the 32B knowledge-distilled version of the 671B DeepSeek R1 — same chain-of-thought training, fraction of the compute. 62.1% GPQA Diamond, 72.0% AIME 2025, 85.4% HumanEval. It approaches the full model on math and logical deduction. MIT license, free to fine-tune. The right pick when you need to solve hard problems locally — theorem-level math, complex debugging, multi-step analysis — on hardware you already own.</div>
+          <div class="model-meta">DeepSeek &middot; MIT &middot; 128K context &middot; ~20 GB VRAM (Q4)</div>
+          <div class="model-why">The strongest battle-tested reasoning model on a single RTX 4090. This is the 32B knowledge-distilled version of the 671B DeepSeek R1 — same chain-of-thought training, fraction of the compute. 62.1% GPQA Diamond, 72.6% AIME 2024, 94.3% MATH-500. Released January 2025 and still the most downloaded reasoning model on Ollama (82M+ pulls) — genuinely proven at scale. MIT license, free to fine-tune. Run it with <code>ollama run deepseek-r1:32b</code>.</div>
           <div class="model-pills">
             <span class="pill orange">MIT license</span>
             <span class="pill blue">Chain-of-thought</span>
-            <span class="pill green">17 GB VRAM</span>
+            <span class="pill green">20 GB VRAM</span>
           </div>
         </div>
         <div class="model-score">
@@ -1253,8 +1253,8 @@
         <div class="rank-badge">4</div>
         <div class="model-info">
           <h3>Llama 4 Scout</h3>
-          <div class="model-meta">Meta &middot; Llama 4 Community License &middot; 10M context &middot; ~24 GB VRAM (Q4)</div>
-          <div class="model-why">One trick that nothing else matches: a 10 million token context window — fit entire codebases, entire books, months of logs in a single prompt. MoE architecture (109B total, only 17B active) keeps inference fast despite the scale. Natively multimodal with text and image support. MMLU 74.3%, HumanEval 81.2%. The context window alone makes it worth running if your use case involves huge documents or large repo Q&amp;A. Note: not true open source — the Llama 4 Community License restricts deployment at 700M+ MAU.</div>
+          <div class="model-meta">Meta &middot; Llama 4 Community License &middot; 10M ctx (128K via Ollama) &middot; ~24 GB VRAM (Q4, 67 GB download)</div>
+          <div class="model-why">One trick nothing else matches: a 10 million token context window — fit entire codebases, books, or months of logs in a single prompt. MoE architecture (109B total, only 17B active per token) keeps inference fast despite the scale. Natively multimodal: text and images. MMLU Pro 74.3%, GPQA Diamond 57.2%, DocVQA 94.4%. Note: Ollama serves it at 128K context by default — the full 10M requires a multi-GPU server build. The 67 GB Q4 download fits a single RTX 4090 (24 GB) but it is tight. Not true open source — the Llama 4 Community License restricts deployment at 700M+ MAU.</div>
           <div class="model-pills">
             <span class="pill purple">10M context</span>
             <span class="pill blue">Multimodal</span>
@@ -1273,7 +1273,7 @@
         <div class="model-info">
           <h3>Phi-4 Reasoning 14B</h3>
           <div class="model-meta">Microsoft &middot; MIT &middot; 32–64K context &middot; ~8 GB VRAM (Q4)</div>
-          <div class="model-why">The best model for machines with limited VRAM — an 8 GB GPU or a MacBook with 16 GB RAM. At only 14B parameters, Phi-4 Reasoning outperforms the DeepSeek R1 70B distill on several reasoning benchmarks, and the 3.8B mini variant runs on phones. Trained with Microsoft's compute-optimal recipe that prioritizes reasoning ability over raw parameter count. Short context (32–64K) is the main constraint; not suitable for large documents. But for logic puzzles, code review, math, and structured analysis, it's the most accessible local reasoning model available.</div>
+          <div class="model-why">The best reasoning model for machines with limited VRAM — an 8 GB GPU or a MacBook with 16 GB RAM. The "plus" variant (Phi-4-reasoning-plus) adds RL training on top of the base SFT and is the one to use: 81.3% AIME 2024 and 68.9% GPQA Diamond, which outperforms the DeepSeek R1 70B distill (5× its size) on both benchmarks. Run it with <code>ollama run phi4-reasoning:14b-plus</code>. Short context (32K, tested to 64K) is the main limit — not suitable for large documents. For math, structured analysis, and code review on laptop hardware, nothing at this weight class comes close.</div>
           <div class="model-pills">
             <span class="pill green">8 GB VRAM</span>
             <span class="pill orange">MIT license</span>
