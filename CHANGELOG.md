@@ -1,5 +1,29 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.48] fix: toast when model is switched during active session (#419)
+
+Synthesized from PRs #516 (armorbreak001), #517 and #518 (cloudyun888).
+
+When a user switches the model via the model picker while a session already
+has messages, a 3-second toast now reads: "Model change takes effect in
+your next conversation." This avoids the confusing situation where the
+dropdown shows the new model but the current conversation continues with
+the original one.
+
+The toast fires from `modelSelect.onchange` in `static/boot.js`, after the
+existing provider-mismatch warning. It checks `S.messages.length > 0` (the
+reliable in-memory array, always initialized by `loadSession`). The
+`showToast` call is guarded with `typeof` for safety during boot.
+
+Key differences from submitted PRs: placement in boot.js onchange (covers
+all selection paths including chip dropdown, since `selectModelFromDropdown`
+calls `sel.onchange`), and uses `S.messages` not `S.session.messages`.
+
+4 new tests in `tests/test_provider_mismatch.py::TestModelSwitchToast`.
+
+Total tests: 1272 (was 1268)
+
+
 ## [v0.50.47] fix/feat: batch fixes — root workspace, custom providers, cron cache, system theme
 
 Synthesized from PRs #506, #507, #508, #509, #510, #514, #515, #519, #521.
