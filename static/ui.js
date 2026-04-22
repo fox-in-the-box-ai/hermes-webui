@@ -154,14 +154,31 @@ async function _fetchLiveModels(provider, sel){
     // Rebuild options from live data
     const existingIds=new Set([...sel.options].map(o=>o.value));
     let added=0;
+    // Apply @provider: prefix to live-fetched model IDs (mirrors the server-side
+    // behaviour for static lists).  Portal providers like Nous return upstream
+    // vendor IDs (e.g. "minimax/minimax-m2.7", "anthropic/claude-opus-4.7") —
+    // without a `@nous:` prefix, `resolve_model_provider()` sees the slash and
+    // mis-routes via OpenRouter → 404.  Prefixing with `@${provider}:` makes
+    // the portal hint explicit so routing honours it (#854).
+    //
+    // Scope: only apply the prefix when this fetch is for the active provider
+    // and that provider is a portal (not OpenRouter / custom, which use bare
+    // or cross-namespace IDs natively).  Skip IDs that already carry an
+    // `@prefix:` — they've already been disambiguated upstream.
+    const _ap=(window._activeProvider||'').toLowerCase();
+    const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && provider===_ap;
     for(const m of data.models){
-      if(existingIds.has(m.id)) continue; // already shown from static list
+      let mid=m.id;
+      if(_isPortalFetch && !mid.startsWith('@')){
+        mid=`@${provider}:${mid}`;
+      }
+      if(existingIds.has(mid)) continue; // already shown from static list
       const opt=document.createElement('option');
-      opt.value=m.id;
+      opt.value=mid;
       opt.textContent=m.label||m.id;
       opt.title='Live model — fetched from provider';
       providerGroup.appendChild(opt);
-      _dynamicModelLabels[m.id]=m.label||m.id;
+      _dynamicModelLabels[mid]=m.label||m.id;
       added++;
     }
     if(added>0){
@@ -188,6 +205,8 @@ async function _fetchLiveModels(provider, sel){
 function _checkProviderMismatch(modelId){
   const ap=(window._activeProvider||'').toLowerCase();
   if(!ap||ap==='custom'||ap==='openrouter') return null; // can't reliably check
+  // @provider: prefixed IDs came from that provider's live model list — no mismatch possible
+  if(modelId.startsWith('@')) return null;
   const slash=modelId.indexOf('/');
   if(slash<0) return null; // bare model name, no provider prefix
   const modelProvider=modelId.substring(0,slash).toLowerCase();
