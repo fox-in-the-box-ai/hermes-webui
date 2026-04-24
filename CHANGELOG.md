@@ -5,6 +5,11 @@
 ### Fixed
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
+## v0.50.200 — 2026-04-24
+
+### Changed
+- **Session render cache — skip O(n) rebuild on back-navigation** — `renderMessages()` now caches rendered HTML per session (keyed by `session_id` + message count). Switching back to a previously-rendered session serves the cached DOM instantly instead of running a full markdown parse, Prism highlight, and KaTeX pass over every message. Cache is limited to 8 sessions and 300KB of rendered HTML per entry. Active streaming sessions always bypass the cache. (`static/ui.js`) By @24601. [#963]
+
 ## v0.50.199 — 2026-04-24
 
 ### Fixed
