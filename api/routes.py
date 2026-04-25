@@ -232,7 +232,13 @@ def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
         return default_model, bool(default_model)
 
     active_provider = _normalize_provider_id(catalog.get("active_provider"))
-    if not active_provider:
+    # Also keep the raw active_provider slug for cross-provider detection with
+    # non-listed providers (ollama-cloud, deepseek, xai, etc.) that _normalize_provider_id
+    # returns "" for. If the raw provider is set but normalization returned "", we still
+    # want to detect that a session model from a known provider (e.g. openai/gpt-5.4-mini)
+    # is stale relative to this unknown active provider. (#1023)
+    raw_active_provider = str(catalog.get("active_provider") or "").strip().lower()
+    if not active_provider and not raw_active_provider:
         return model, False
 
     slash = model.find("/")
@@ -275,7 +281,12 @@ def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
 
     # Skip normalization for models on custom/openrouter namespaces — these are
     # user-controlled and should never be silently replaced.
-    if model_provider and model_provider not in {"", "custom", "openrouter"} and model_provider != active_provider and default_model:
+    # Also normalize when the model is from a known provider but the active provider
+    # is an unlisted one (e.g. ollama-cloud) — active_provider is "" in that case
+    # but raw_active_provider is set. If model_provider doesn't start with the raw
+    # active provider name, the session model is stale. (#1023)
+    _active_for_compare = active_provider or raw_active_provider
+    if model_provider and model_provider not in {"", "custom", "openrouter"} and model_provider != _active_for_compare and default_model:
         return default_model, True
     return model, False
 
@@ -1224,6 +1235,9 @@ def handle_post(handler, parsed) -> bool:
         # Delete from WebUI session store
         with LOCK:
             SESSIONS.pop(sid, None)
+        # Evict cached agent so turn count doesn't leak into a recycled session
+        from api.config import _evict_session_agent
+        _evict_session_agent(sid)
         try:
             p = (SESSION_DIR / f"{sid}.json").resolve()
             p.relative_to(SESSION_DIR.resolve())
@@ -1264,6 +1278,9 @@ def handle_post(handler, parsed) -> bool:
             s.tool_calls = []
             s.title = "Untitled"
             s.save()
+            # Evict cached agent — cleared session is a fresh conversation
+            from api.config import _evict_session_agent
+            _evict_session_agent(body["session_id"])
         return j(handler, {"ok": True, "session": s.compact()})
 
     if parsed.path == "/api/session/truncate":
@@ -3552,21 +3569,22 @@ def _handle_session_import_cli(handler, body):
     if not msgs:
         return bad(handler, "Session not found in CLI store", 404)
 
-    # Derive title from first user message
-    title = title_from(msgs, "CLI Session")
-    model = "unknown"
-
-    # Get profile, model, and timestamps from CLI session metadata
+    # Get profile, model, timestamps, and title from CLI session metadata
     profile = None
     created_at = None
     updated_at = None
+    cli_title = None
     for cs in get_cli_sessions():
         if cs["session_id"] == sid:
             profile = cs.get("profile")
             model = cs.get("model", "unknown")
             created_at = cs.get("created_at")
             updated_at = cs.get("updated_at")
+            cli_title = cs.get("title")
             break
+
+    # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
+    title = cli_title or title_from(msgs, "CLI Session")
 
     s = import_cli_session(
         sid,
