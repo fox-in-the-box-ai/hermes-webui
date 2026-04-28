@@ -10,13 +10,24 @@ const TERMINAL_UI={
   resizeTimer:null,
   closeTimer:null,
   typedLine:'',
+  height:null,
+  resizeHandleReady:false,
+  resizing:false,
+  resizeStartY:0,
+  resizeStartHeight:0,
 };
+
+const TERMINAL_HEIGHT_DEFAULT=260;
+const TERMINAL_HEIGHT_MIN=180;
+const TERMINAL_HEIGHT_MAX=520;
+const TERMINAL_MOBILE_HEIGHT_DEFAULT=190;
+const TERMINAL_MOBILE_HEIGHT_MIN=140;
+const TERMINAL_MOBILE_HEIGHT_MAX=300;
 
 function _terminalEls(){
   return {
     panel:$('composerTerminalPanel'),
     inner:$('composerTerminalPanel')&&$('composerTerminalPanel').querySelector('.composer-terminal-inner'),
-    dock:$('composerTerminalDock'),
     handle:$('terminalResizeHandle'),
     viewport:$('terminalViewport'),
     surface:$('terminalSurface'),
@@ -158,6 +169,106 @@ function _terminalDimensions(){
   const term=TERMINAL_UI.term;
   if(term&&term.cols&&term.rows)return {rows:term.rows,cols:term.cols};
   return {rows:18,cols:80};
+}
+
+function _terminalHeightBounds(){
+  const mobile=window.matchMedia&&window.matchMedia('(max-width: 700px)').matches;
+  const min=mobile?TERMINAL_MOBILE_HEIGHT_MIN:TERMINAL_HEIGHT_MIN;
+  const maxByViewport=Math.floor(window.innerHeight*(mobile?0.44:0.5));
+  const hardMax=mobile?TERMINAL_MOBILE_HEIGHT_MAX:TERMINAL_HEIGHT_MAX;
+  return {
+    min,
+    max:Math.max(min,Math.min(hardMax,maxByViewport)),
+    defaultHeight:mobile?TERMINAL_MOBILE_HEIGHT_DEFAULT:TERMINAL_HEIGHT_DEFAULT,
+  };
+}
+
+function _clampTerminalHeight(height){
+  const bounds=_terminalHeightBounds();
+  const n=Number(height);
+  const fallback=TERMINAL_UI.height||bounds.defaultHeight;
+  return Math.max(bounds.min,Math.min(bounds.max,Number.isFinite(n)?n:fallback));
+}
+
+function _applyTerminalHeight(height){
+  const {inner,handle}= _terminalEls();
+  const next=_clampTerminalHeight(height);
+  TERMINAL_UI.height=next;
+  if(inner)inner.style.setProperty('--composer-terminal-height',next+'px');
+  if(handle){
+    const bounds=_terminalHeightBounds();
+    handle.setAttribute('aria-valuemin',String(bounds.min));
+    handle.setAttribute('aria-valuemax',String(bounds.max));
+    handle.setAttribute('aria-valuenow',String(next));
+  }
+  if(TERMINAL_UI.open){
+    _fitTerminal();
+    _syncTerminalTranscriptSpace(true);
+  }
+  return next;
+}
+
+function _resetTerminalHeightForViewport(){
+  const bounds=_terminalHeightBounds();
+  _applyTerminalHeight(TERMINAL_UI.height||bounds.defaultHeight);
+}
+
+function _startTerminalHeightResize(ev){
+  if(ev.pointerType==='touch')return;
+  const {inner,handle}= _terminalEls();
+  if(!inner||!handle)return;
+  ev.preventDefault();
+  TERMINAL_UI.resizing=true;
+  TERMINAL_UI.resizeStartY=ev.clientY;
+  TERMINAL_UI.resizeStartHeight=TERMINAL_UI.height||inner.getBoundingClientRect().height||_terminalHeightBounds().defaultHeight;
+  inner.classList.add('is-resizing');
+  try{handle.setPointerCapture(ev.pointerId);}catch(_){}
+}
+
+function _moveTerminalHeightResize(ev){
+  if(!TERMINAL_UI.resizing)return;
+  ev.preventDefault();
+  _applyTerminalHeight(TERMINAL_UI.resizeStartHeight+(TERMINAL_UI.resizeStartY-ev.clientY));
+}
+
+function _endTerminalHeightResize(ev){
+  if(!TERMINAL_UI.resizing)return;
+  TERMINAL_UI.resizing=false;
+  const {inner,handle}= _terminalEls();
+  if(inner)inner.classList.remove('is-resizing');
+  if(handle&&ev&&ev.pointerId!==undefined)try{handle.releasePointerCapture(ev.pointerId);}catch(_){}
+  _fitTerminal();
+}
+
+function _handleTerminalResizeKey(ev){
+  let delta=0;
+  if(ev.key==='ArrowUp')delta=16;
+  else if(ev.key==='ArrowDown')delta=-16;
+  else if(ev.key==='PageUp')delta=64;
+  else if(ev.key==='PageDown')delta=-64;
+  else if(ev.key==='Home'){
+    ev.preventDefault();
+    return _applyTerminalHeight(_terminalHeightBounds().min);
+  }
+  else if(ev.key==='End'){
+    ev.preventDefault();
+    return _applyTerminalHeight(_terminalHeightBounds().max);
+  }
+  else return;
+  ev.preventDefault();
+  _applyTerminalHeight((TERMINAL_UI.height||_terminalHeightBounds().defaultHeight)+delta);
+}
+
+function _initTerminalResizeHandle(){
+  if(TERMINAL_UI.resizeHandleReady)return;
+  const {handle}= _terminalEls();
+  if(!handle)return;
+  TERMINAL_UI.resizeHandleReady=true;
+  handle.addEventListener('pointerdown',_startTerminalHeightResize);
+  handle.addEventListener('pointermove',_moveTerminalHeightResize);
+  handle.addEventListener('pointerup',_endTerminalHeightResize);
+  handle.addEventListener('pointercancel',_endTerminalHeightResize);
+  handle.addEventListener('keydown',_handleTerminalResizeKey);
 }
 
 function _terminalMessagesEl(){
@@ -307,9 +418,9 @@ async function toggleComposerTerminal(force){
     const {panel,inner}= _terminalEls();
     if(!panel)return;
     clearTimeout(TERMINAL_UI.closeTimer);
+    panel.hidden=false;
     _initTerminalResizeHandle();
     _resetTerminalHeightForViewport();
-    _setTerminalChromeState('expanded');
     requestAnimationFrame(()=>{
       panel.classList.add('is-open');
       window.setTimeout(_fitTerminal,80);
@@ -471,10 +582,6 @@ window.addEventListener('beforeunload',()=>{
 
 window.addEventListener('resize',()=>{
   if(!TERMINAL_UI.open)return;
-  if(TERMINAL_UI.collapsed){
-    _syncTerminalTranscriptSpace('collapsed');
-    return;
-  }
   _resetTerminalHeightForViewport();
 });
 
