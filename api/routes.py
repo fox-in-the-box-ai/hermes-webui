@@ -2872,7 +2872,7 @@ def _handle_chat_start(handler, body):
     msg = str(body.get("message", "")).strip()
     if not msg:
         return bad(handler, "message is required")
-    attachments = [str(a) for a in (body.get("attachments") or [])][:20]
+    attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
     try:
         workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
     except ValueError as e:
@@ -2920,6 +2920,36 @@ def _handle_chat_start(handler, body):
     if normalized_model:
         response["effective_model"] = model
     return j(handler, response)
+
+
+def _normalize_chat_attachments(raw_attachments):
+    """Normalize attachment payloads from the browser.
+
+    Older clients send a list of filenames. Newer clients send upload result
+    objects containing name/path/mime/size so image attachments can be supplied
+    to Hermes as native multimodal inputs for the current turn.
+    """
+    normalized = []
+    if not isinstance(raw_attachments, list):
+        return normalized
+    for item in raw_attachments:
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("filename") or "").strip()
+            path = str(item.get("path") or "").strip()
+            mime = str(item.get("mime") or "").strip()
+            att = {"name": name or path, "path": path, "mime": mime}
+            size = item.get("size")
+            if isinstance(size, int):
+                att["size"] = size
+            is_image = item.get("is_image")
+            if isinstance(is_image, bool):
+                att["is_image"] = is_image
+            normalized.append(att)
+        else:
+            value = str(item).strip()
+            if value:
+                normalized.append({"name": value, "path": "", "mime": ""})
+    return normalized
 
 
 def _handle_chat_sync(handler, body):

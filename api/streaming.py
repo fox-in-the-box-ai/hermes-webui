@@ -2,9 +2,11 @@
 Hermes Web UI -- SSE streaming engine and agent thread runner.
 Includes Sprint 10 cancel support via CANCEL_FLAGS.
 """
+import base64
 import contextlib
 import json
 import logging
+import mimetypes
 import os
 import queue
 import re
@@ -62,6 +64,60 @@ from api.workspace import set_last_workspace
 # Everything else (attachments, timestamp, _ts, etc.) is display-only
 # metadata added by the webui and must be stripped before the API call.
 _API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal'}
+
+_NATIVE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+
+
+def _attachment_name(att) -> str:
+    if isinstance(att, dict):
+        return str(att.get('name') or att.get('filename') or att.get('path') or '').strip()
+    return str(att or '').strip()
+
+
+def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str):
+    """Build native multimodal content parts for current-turn image uploads.
+
+    WebUI uploads files into the active workspace. For image files, pass the
+    bytes to Hermes as OpenAI-style image_url data URLs so vision-capable main
+    models can consume them in the same request. Non-image files intentionally
+    stay as text path attachments so the agent can inspect them with file tools.
+    """
+    if not attachments:
+        return workspace_ctx + msg_text
+
+    parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
+    workspace_root = Path(workspace).expanduser().resolve()
+    image_count = 0
+
+    for att in attachments or []:
+        if not isinstance(att, dict):
+            continue
+        raw_path = str(att.get('path') or '').strip()
+        if not raw_path:
+            continue
+        try:
+            path = Path(raw_path).expanduser().resolve()
+            # Uploads should live inside the selected workspace. Do not read
+            # arbitrary paths from client-provided attachment metadata.
+            path.relative_to(workspace_root)
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            if size <= 0 or size > _NATIVE_IMAGE_MAX_BYTES:
+                continue
+            mime = str(att.get('mime') or '').strip() or (mimetypes.guess_type(path.name)[0] or '')
+            if not mime.startswith('image/'):
+                continue
+            data = base64.b64encode(path.read_bytes()).decode('ascii')
+        except Exception:
+            continue
+        parts.append({
+            'type': 'image_url',
+            'image_url': {'url': f'data:{mime};base64,{data}'},
+        })
+        image_count += 1
+
+    return parts if image_count else workspace_ctx + msg_text
 
 
 def _strip_thinking_markup(text: str) -> str:
@@ -1677,8 +1733,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             )
             _ckpt_thread.start()
 
+            user_message = _build_native_multimodal_message(workspace_ctx, msg_text, attachments, workspace)
             result = agent.run_conversation(
-                user_message=workspace_ctx + msg_text,
+                user_message=user_message,
                 system_message=workspace_system_msg,
                 conversation_history=_sanitize_messages_for_api(s.messages),
                 task_id=session_id,
@@ -1902,13 +1959,14 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 # Only tag a user message whose content relates to this turn's text
                 # (msg_text is the full message including the [Attached files: ...] suffix)
                 if attachments:
+                    display_attachments = [_attachment_name(a) for a in attachments if _attachment_name(a)]
                     for m in reversed(s.messages):
                         if m.get('role') == 'user':
                             content = str(m.get('content', ''))
                             # Match if content is part of the sent message or vice-versa
                             base_text = msg_text.split('\n\n[Attached files:')[0].strip() if '\n\n[Attached files:' in msg_text else msg_text
                             if base_text[:60] in content or content[:60] in msg_text:
-                                m['attachments'] = attachments
+                                m['attachments'] = display_attachments
                                 break
                 # Persist reasoning trace in the session so it survives reload.
                 # Must run BEFORE s.save() — otherwise the mutation lives only in
