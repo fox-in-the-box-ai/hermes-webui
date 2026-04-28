@@ -1606,7 +1606,7 @@ function renderWorkspacesPanel(workspaces){
           loadWorkspaceList().then(() => {});
         }
       } catch(err){
-        showToast(t('workspace_reorder_failed') + ': ' + err.message, 'error');
+        showToast(t('workspace_reorder_failed'), 'error');
       }
     });
 
