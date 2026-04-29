@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Compaction preserves visible prompts** — WebUI now keeps model-facing compacted context separately from the visible transcript, so automatic context compaction no longer replaces earlier user prompts in the scrollback. (`api/models.py`, `api/streaming.py`, `api/routes.py`) @franksong2702 — Closes #1217
+
 ## [v0.50.237] — 2026-04-29
 
 ### Added

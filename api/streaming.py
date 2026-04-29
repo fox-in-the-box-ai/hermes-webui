@@ -998,6 +998,101 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     return updated_messages
 
 
+def _session_context_messages(session):
+    """Return model-facing history without assuming it matches the UI transcript."""
+    context_messages = getattr(session, 'context_messages', None)
+    if isinstance(context_messages, list) and context_messages:
+        return context_messages
+    return session.messages or []
+
+
+def _message_identity(msg):
+    if not isinstance(msg, dict):
+        return None
+    role = str(msg.get('role') or '')
+    content = msg.get('content', '')
+    text = _message_text(content)
+    if not text and not msg.get('tool_call_id') and not msg.get('tool_calls'):
+        return None
+    return (
+        role,
+        " ".join(str(text or '').split())[:500],
+        str(msg.get('tool_call_id') or ''),
+        json.dumps(msg.get('tool_calls') or [], sort_keys=True, ensure_ascii=False),
+    )
+
+
+def _messages_have_prefix(messages, prefix):
+    if len(messages or []) < len(prefix or []):
+        return False
+    for idx, expected in enumerate(prefix or []):
+        if _message_identity((messages or [])[idx]) != _message_identity(expected):
+            return False
+    return True
+
+
+def _is_context_compression_marker(msg):
+    if not isinstance(msg, dict):
+        return False
+    text = _message_text(msg.get('content', '')).lower()
+    return (
+        'context compaction' in text
+        or 'context compression' in text
+        or 'context was auto-compressed' in text
+        or 'active task list was preserved across context compression' in text
+    )
+
+
+def _find_current_user_turn(messages, msg_text):
+    needle = " ".join(str(msg_text or '').split())
+    fallback = None
+    for idx, msg in enumerate(messages or []):
+        if not isinstance(msg, dict) or msg.get('role') != 'user':
+            continue
+        fallback = idx
+        text = " ".join(_message_text(msg.get('content', '')).split())
+        if needle and (needle in text or text in needle):
+            return idx
+    return fallback
+
+
+def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text):
+    """Keep UI transcript durable while allowing model context to compact.
+
+    If Hermes Agent returns a normal append-only history, append that delta to
+    the UI transcript. If the model/context history was compacted and no longer
+    has the prior context as a prefix, keep the previous UI transcript and append
+    only compaction marker messages plus the current user turn onward.
+    """
+    previous_display = list(previous_display or [])
+    previous_context = list(previous_context or [])
+    result_messages = list(result_messages or [])
+    if not result_messages:
+        return previous_display
+
+    if _messages_have_prefix(result_messages, previous_context):
+        candidates = result_messages[len(previous_context):]
+    else:
+        current_user_idx = _find_current_user_turn(result_messages, msg_text)
+        marker_candidates = [
+            m for m in result_messages[:current_user_idx if current_user_idx is not None else len(result_messages)]
+            if _is_context_compression_marker(m)
+        ]
+        turn_candidates = result_messages[current_user_idx:] if current_user_idx is not None else []
+        candidates = marker_candidates + turn_candidates
+
+    merged = previous_display[:]
+    seen = {_message_identity(m) for m in merged}
+    for msg in candidates:
+        key = _message_identity(msg)
+        if _is_context_compression_marker(msg) and key is not None and key in seen:
+            continue
+        merged.append(copy.deepcopy(msg))
+        if key is not None:
+            seen.add(key)
+    return merged
+
+
 def _tool_result_snippet(raw) -> str:
     """Extract a compact result preview from a stored tool message payload."""
     text = str(raw or '')
@@ -1668,6 +1763,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             if _personality_prompt:
                 agent.ephemeral_system_prompt = _personality_prompt
             _previous_messages = list(s.messages or [])
+            _previous_context_messages = list(_session_context_messages(s))
 
             # ── Periodic checkpoint during streaming (Issue #765) ──
             # The agent works on an internal copy of s.messages during run_conversation()
@@ -1711,7 +1807,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg_text,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(s.messages),
+                conversation_history=_sanitize_messages_for_api(_previous_context_messages),
                 task_id=session_id,
                 persist_user_message=msg_text,
             )
@@ -1741,9 +1837,17 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             if _ckpt_thread is not None:
                 _ckpt_thread.join(timeout=15)
             with _agent_lock:
-                s.messages = _restore_reasoning_metadata(
+                _result_messages = result.get('messages') or _previous_context_messages
+                _next_context_messages = _restore_reasoning_metadata(
+                    _previous_context_messages,
+                    _result_messages,
+                )
+                s.context_messages = _next_context_messages
+                s.messages = _merge_display_messages_after_agent_result(
                     _previous_messages,
-                    result.get('messages') or s.messages,
+                    _previous_context_messages,
+                    _restore_reasoning_metadata(_previous_messages, _result_messages),
+                    msg_text,
                 )
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>

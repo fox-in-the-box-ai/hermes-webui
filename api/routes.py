@@ -3207,14 +3207,20 @@ def _handle_chat_sync(handler, body):
                 "write_file, read_file, search_files, terminal workdir, and patch. "
                 "Never fall back to a hardcoded path when this tag is present."
             )
-            from api.streaming import _sanitize_messages_for_api, _restore_reasoning_metadata
+            from api.streaming import (
+                _merge_display_messages_after_agent_result,
+                _restore_reasoning_metadata,
+                _sanitize_messages_for_api,
+                _session_context_messages,
+            )
 
             _previous_messages = list(s.messages or [])
+            _previous_context_messages = list(_session_context_messages(s))
 
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(s.messages),
+                conversation_history=_sanitize_messages_for_api(_previous_context_messages),
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
@@ -3233,9 +3239,17 @@ def _handle_chat_sync(handler, body):
             else:
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
     with _get_session_agent_lock(s.session_id):
-        s.messages = _restore_reasoning_metadata(
+        _result_messages = result.get("messages") or _previous_context_messages
+        _next_context_messages = _restore_reasoning_metadata(
+            _previous_context_messages,
+            _result_messages,
+        )
+        s.context_messages = _next_context_messages
+        s.messages = _merge_display_messages_after_agent_result(
             _previous_messages,
-            result.get("messages") or s.messages,
+            _previous_context_messages,
+            _restore_reasoning_metadata(_previous_messages, _result_messages),
+            msg,
         )
         # Only auto-generate title when still default; preserves user renames
         if s.title == "Untitled":
@@ -3861,6 +3875,7 @@ def _handle_session_compress(handler, body):
                 return bad(handler, "Session was modified during compression; please retry.", 409)
 
             s.messages = compressed
+            s.context_messages = compressed
             s.tool_calls = []
             s.active_stream_id = None
             s.pending_user_message = None
