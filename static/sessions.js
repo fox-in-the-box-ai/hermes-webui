@@ -1424,13 +1424,15 @@ function renderSessionListFromCache(){
   // real once the first message is sent. The server already filters them, but this
   // guard ensures a brand-new active session doesn't flash into the list while
   // _allSessions is stale from a prior render (#1171).
+  // Always include the active session even with 0 messages so it appears immediately
+  // when created (fixes: new chat not visible until first message is sent).
   const withMessages=allMatched.filter(s=>
     (s.message_count||0)>0 ||
     _isSessionEffectivelyStreaming(s) ||
     !!s.active_stream_id ||
     !!s.pending_user_message ||
     (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
-    (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0)
+    (S.session&&s.session_id===S.session.session_id)
   );
   // Filter by active profile (unless "All profiles" is toggled on)
   // Server backfills profile='default' for legacy sessions, so every session has a profile.
