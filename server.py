@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
+from api.fitb_onboarding import onboarding_complete, onboarding_exempt
 from api.helpers import j, get_profile_cookie
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_get, handle_post
@@ -71,7 +72,13 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            if not check_auth(self, parsed): return
+            if not onboarding_exempt(parsed.path) and not onboarding_complete():
+                self.send_response(302)
+                self.send_header("Location", "/setup")
+                self.end_headers()
+                return
+            if not check_auth(self, parsed):
+                return
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
@@ -89,7 +96,13 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            if not check_auth(self, parsed): return
+            if not onboarding_exempt(parsed.path) and not onboarding_complete():
+                self.send_response(302)
+                self.send_header("Location", "/setup")
+                self.end_headers()
+                return
+            if not check_auth(self, parsed):
+                return
             result = handle_post(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
