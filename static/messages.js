@@ -34,6 +34,10 @@ function _markActiveSessionViewedOnReturn() {
 
 document.addEventListener('visibilitychange', _markActiveSessionViewedOnReturn);
 window.addEventListener('focus', _markActiveSessionViewedOnReturn);
+// TTS: pause speech synthesis when user focuses the composer (#499)
+const _msgEl=document.getElementById('msg');
+if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window && speechSynthesis.speaking) speechSynthesis.pause(); });
+if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window && speechSynthesis.paused) speechSynthesis.resume(); });
 
 async function send(){
   const text=$('msg').value.trim();
@@ -139,7 +143,7 @@ async function send(){
   catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
 
   const uploadedNames=uploaded.map(u=>u.name||u);
-  const uploadedPaths=uploaded.map(u=>u.path||u.name||u);
+  const uploadedPaths=uploaded.map(u=>u&&u.is_image?(u.name||u.filename||u):(u.path||u.name||u));
   let msgText=text;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
@@ -182,7 +186,7 @@ async function send(){
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
       model:S.session.model||$('modelSelect').value,workspace:S.session.workspace,
-      attachments:uploaded.length?uploadedNames:undefined
+      attachments:uploaded.length?uploaded:undefined
     })});
     if(startData.effective_model && S.session){
       S.session.model=startData.effective_model;
@@ -846,6 +850,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
         if(isSessionViewed) _markSessionViewed(completedSid, completedSession.message_count ?? S.messages.length);
         syncTopbar();renderMessages();loadDir('.');
+        // TTS auto-read: speak the last assistant response if enabled (#499)
+        if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
       }
       _queueDrainSid=activeSid;renderSessionList();setBusy(false);setStatus('');
       setComposerStatus('');
@@ -1308,6 +1314,50 @@ async function respondApproval(choice) {
 
 function startApprovalPolling(sid) {
   stopApprovalPolling();
+  // ── SSE (preferred): long-lived connection, server pushes instantly ──
+  try {
+    const es = new EventSource('/api/approval/stream?session_id=' + encodeURIComponent(sid));
+    let _fallbackActive = false;
+
+    es.addEventListener('initial', e => {
+      const d = JSON.parse(e.data);
+      if (d.pending) { d.pending._session_id = sid; showApprovalCard(d.pending, d.pending_count || 1); }
+      else { hideApprovalCard(); }
+    });
+
+    es.addEventListener('approval', e => {
+      const d = JSON.parse(e.data);
+      if (d.pending) { d.pending._session_id = sid; showApprovalCard(d.pending, d.pending_count || 1); }
+      else { hideApprovalCard(); }
+    });
+
+    es.onerror = () => {
+      // SSE failed — fall back to HTTP polling (3s interval)
+      if (_fallbackActive) return;
+      _fallbackActive = true;
+      try { es.close(); } catch(_){}
+      _startApprovalFallbackPoll(sid);
+    };
+
+    // If the session changes or stops being busy, close the SSE.
+    // We detect this via a periodic check (cheap — no network request).
+    _approvalSSEHealthTimer = setInterval(() => {
+      if (!S.busy || !S.session || S.session.session_id !== sid) {
+        stopApprovalPolling(); hideApprovalCard(true);
+      }
+    }, 5000);
+
+    _approvalEventSource = es;
+  } catch(_e) {
+    // EventSource constructor failed — use polling directly
+    _startApprovalFallbackPoll(sid);
+  }
+}
+
+let _approvalEventSource = null;
+let _approvalSSEHealthTimer = null;
+
+function _startApprovalFallbackPoll(sid) {
   _approvalPollTimer = setInterval(async () => {
     if (!S.busy || !S.session || S.session.session_id !== sid) {
       stopApprovalPolling(); hideApprovalCard(true); return;
@@ -1317,11 +1367,13 @@ function startApprovalPolling(sid) {
       if (data.pending) { data.pending._session_id=sid; showApprovalCard(data.pending, data.pending_count||1); }
       else { hideApprovalCard(); }
     } catch(e) { /* ignore poll errors */ }
-  }, 1500);
+  }, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
 }
 
 function stopApprovalPolling() {
   if (_approvalPollTimer) { clearInterval(_approvalPollTimer); _approvalPollTimer = null; }
+  if (_approvalEventSource) { try { _approvalEventSource.close(); } catch(_){} _approvalEventSource = null; }
+  if (_approvalSSEHealthTimer) { clearInterval(_approvalSSEHealthTimer); _approvalSSEHealthTimer = null; }
 }
 
 // ── Clarify polling ──

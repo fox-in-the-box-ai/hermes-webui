@@ -2,9 +2,11 @@
 Hermes Web UI -- SSE streaming engine and agent thread runner.
 Includes Sprint 10 cancel support via CANCEL_FLAGS.
 """
+import base64
 import contextlib
 import json
 import logging
+import mimetypes
 import os
 import queue
 import re
@@ -62,6 +64,110 @@ from api.workspace import set_last_workspace
 # Everything else (attachments, timestamp, _ts, etc.) is display-only
 # metadata added by the webui and must be stripped before the API call.
 _API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal'}
+
+_NATIVE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+
+
+def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
+    """Build thread-local agent env with per-run values overriding profile defaults.
+
+    Profile runtime env may include TERMINAL_CWD from config.yaml. Passing it as
+    **kwargs alongside an explicit TERMINAL_CWD raises TypeError before the
+    agent starts, so merge into one dict first and let the active workspace win.
+    """
+    env = dict(profile_runtime_env or {})
+    env.update({
+        'TERMINAL_CWD': str(workspace),
+        'HERMES_EXEC_ASK': '1',
+        'HERMES_SESSION_KEY': session_id,
+        'HERMES_HOME': profile_home,
+    })
+    return env
+
+
+def _attachment_name(att) -> str:
+    if isinstance(att, dict):
+        return str(att.get('name') or att.get('filename') or att.get('path') or '').strip()
+    return str(att or '').strip()
+
+
+_IMAGE_MAGIC: dict[bytes | None, frozenset[str]] = {
+    b'\x89PNG\r\n\x1a\n': frozenset({'image/png'}),
+    b'\xff\xd8\xff': frozenset({'image/jpeg'}),
+    b'GIF87a': frozenset({'image/gif'}),
+    b'GIF89a': frozenset({'image/gif'}),
+    b'RIFF': frozenset({'image/webp'}),
+    b'BM': frozenset({'image/bmp'}),
+    None: frozenset({'image/svg+xml'}),
+}
+
+
+def _is_valid_image(path: Path, mime: str) -> bool:
+    """Check that the file's first bytes match the expected image MIME type.
+
+    Uses simple magic-number detection (no external dependency). SVG is
+    allowed through because it is text-based and has no binary signature.
+    """
+    if not mime.startswith('image/'):
+        return False
+    mime_base = mime.split(';', 1)[0]
+    if mime_base == 'image/svg+xml':
+        return True
+    try:
+        with path.open('rb') as fh:
+            head = fh.read(16)
+    except OSError:
+        return False
+    for magic, mimes in _IMAGE_MAGIC.items():
+        if magic is not None and head.startswith(magic) and mime_base in mimes:
+            return True
+    return False
+
+
+def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str):
+    """Build native multimodal content parts for current-turn image uploads.
+
+    WebUI uploads files into the active workspace. For image files, pass the
+    bytes to Hermes as OpenAI-style image_url data URLs so vision-capable main
+    models can consume them in the same request. Non-image files intentionally
+    stay as text path attachments so the agent can inspect them with file tools.
+    """
+    if not attachments:
+        return workspace_ctx + msg_text
+
+    parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
+    workspace_root = Path(workspace).expanduser().resolve()
+    image_count = 0
+
+    for att in attachments or []:
+        if not isinstance(att, dict):
+            continue
+        raw_path = str(att.get('path') or '').strip()
+        if not raw_path:
+            continue
+        try:
+            path = Path(raw_path).expanduser().resolve()
+            # Uploads should live inside the selected workspace. Do not read
+            # arbitrary paths from client-provided attachment metadata.
+            path.relative_to(workspace_root)
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            if size <= 0 or size > _NATIVE_IMAGE_MAX_BYTES:
+                continue
+            mime = str(att.get('mime') or '').strip() or (mimetypes.guess_type(path.name)[0] or '')
+            if not mime.startswith('image/') or not _is_valid_image(path, mime):
+                continue
+            data = base64.b64encode(path.read_bytes()).decode('ascii')
+        except Exception:
+            continue
+        parts.append({
+            'type': 'image_url',
+            'image_url': {'url': f'data:{mime};base64,{data}'},
+        })
+        image_count += 1
+
+    return parts if image_count else workspace_ctx + msg_text
 
 
 def _strip_thinking_markup(text: str) -> str:
@@ -998,6 +1104,101 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     return updated_messages
 
 
+def _session_context_messages(session):
+    """Return model-facing history without assuming it matches the UI transcript."""
+    context_messages = getattr(session, 'context_messages', None)
+    if isinstance(context_messages, list) and context_messages:
+        return context_messages
+    return session.messages or []
+
+
+def _message_identity(msg):
+    if not isinstance(msg, dict):
+        return None
+    role = str(msg.get('role') or '')
+    content = msg.get('content', '')
+    text = _message_text(content)
+    if not text and not msg.get('tool_call_id') and not msg.get('tool_calls'):
+        return None
+    return (
+        role,
+        " ".join(str(text or '').split())[:500],
+        str(msg.get('tool_call_id') or ''),
+        json.dumps(msg.get('tool_calls') or [], sort_keys=True, ensure_ascii=False),
+    )
+
+
+def _messages_have_prefix(messages, prefix):
+    if len(messages or []) < len(prefix or []):
+        return False
+    for idx, expected in enumerate(prefix or []):
+        if _message_identity((messages or [])[idx]) != _message_identity(expected):
+            return False
+    return True
+
+
+def _is_context_compression_marker(msg):
+    if not isinstance(msg, dict):
+        return False
+    text = _message_text(msg.get('content', '')).lower()
+    return (
+        'context compaction' in text
+        or 'context compression' in text
+        or 'context was auto-compressed' in text
+        or 'active task list was preserved across context compression' in text
+    )
+
+
+def _find_current_user_turn(messages, msg_text):
+    needle = " ".join(str(msg_text or '').split())
+    fallback = None
+    for idx, msg in enumerate(messages or []):
+        if not isinstance(msg, dict) or msg.get('role') != 'user':
+            continue
+        fallback = idx
+        text = " ".join(_message_text(msg.get('content', '')).split())
+        if needle and (needle in text or text in needle):
+            return idx
+    return fallback
+
+
+def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text):
+    """Keep UI transcript durable while allowing model context to compact.
+
+    If Hermes Agent returns a normal append-only history, append that delta to
+    the UI transcript. If the model/context history was compacted and no longer
+    has the prior context as a prefix, keep the previous UI transcript and append
+    only compaction marker messages plus the current user turn onward.
+    """
+    previous_display = list(previous_display or [])
+    previous_context = list(previous_context or [])
+    result_messages = list(result_messages or [])
+    if not result_messages:
+        return previous_display
+
+    if _messages_have_prefix(result_messages, previous_context):
+        candidates = result_messages[len(previous_context):]
+    else:
+        current_user_idx = _find_current_user_turn(result_messages, msg_text)
+        marker_candidates = [
+            m for m in result_messages[:current_user_idx if current_user_idx is not None else len(result_messages)]
+            if _is_context_compression_marker(m)
+        ]
+        turn_candidates = result_messages[current_user_idx:] if current_user_idx is not None else []
+        candidates = marker_candidates + turn_candidates
+
+    merged = previous_display[:]
+    seen = {_message_identity(m) for m in merged}
+    for msg in candidates:
+        key = _message_identity(msg)
+        if _is_context_compression_marker(msg) and key is not None and key in seen:
+            continue
+        merged.append(copy.deepcopy(msg))
+        if key is not None:
+            seen.add(key)
+    return merged
+
+
 def _tool_result_snippet(raw) -> str:
     """Extract a compact result preview from a stored tool message payload."""
     text = str(raw or '')
@@ -1155,6 +1356,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
     old_exec_ask = None
     old_session_key = None
     old_hermes_home = None
+    old_profile_env = {}
 
     # ── MCP Server Discovery (lazy import, idempotent) ──
     # discover_mcp_tools() is called here (rather than at server startup) so that
@@ -1226,26 +1428,32 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
         # two concurrent tabs on different profiles don't clobber each other via the
         # process-level active-profile global.  Falls back gracefully.
         try:
-            from api.profiles import get_hermes_home_for_profile
-            _profile_home = str(get_hermes_home_for_profile(getattr(s, 'profile', None)))
+            from api.profiles import get_hermes_home_for_profile, get_profile_runtime_env
+            _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
+            _profile_home = str(_profile_home_path)
+            _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
+            _profile_runtime_env = {}
 
-        _set_thread_env(
-            TERMINAL_CWD=str(s.workspace),
-            HERMES_EXEC_ASK='1',
-            HERMES_SESSION_KEY=session_id,
-            HERMES_HOME=_profile_home,
+        _thread_env = _build_agent_thread_env(
+            _profile_runtime_env,
+            str(s.workspace),
+            session_id,
+            _profile_home,
         )
+        _set_thread_env(**_thread_env)
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
         # and preventing a deadlock where the restore would re-enter the same lock.
         with _ENV_LOCK:
+            old_profile_env = {key: os.environ.get(key) for key in _profile_runtime_env}
             old_cwd = os.environ.get('TERMINAL_CWD')
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
             old_session_key = os.environ.get('HERMES_SESSION_KEY')
             old_hermes_home = os.environ.get('HERMES_HOME')
+            os.environ.update(_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
             os.environ['HERMES_SESSION_KEY'] = session_id
@@ -1493,19 +1701,25 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _toolsets = _resolve_cli_toolsets(_cfg)
 
             # Fallback model from profile config (e.g. for rate-limit recovery)
-            _fallback = _cfg.get('fallback_model') or None
+            _fallback = _cfg.get('fallback_model') or _cfg.get('fallback_providers') or None
+            _fallback_resolved = None
             if _fallback:
-                # Resolve the fallback through our provider logic too
-                fb_model = _fallback.get('model', '')
-                fb_provider = _fallback.get('provider', '')
-                fb_base_url = _fallback.get('base_url')
-                _fallback_resolved = {
-                    'model': fb_model,
-                    'provider': fb_provider,
-                    'base_url': fb_base_url,
-                }
-            else:
-                _fallback_resolved = None
+                # Normalize: support both single dict (legacy) and list (chained fallback).
+                # Use the first valid entry as the fallback passed to AIAgent.
+                _fb_entry = None
+                if isinstance(_fallback, list):
+                    for _entry in _fallback:
+                        if isinstance(_entry, dict) and _entry.get('model'):
+                            _fb_entry = _entry
+                            break
+                elif isinstance(_fallback, dict) and _fallback.get('model'):
+                    _fb_entry = _fallback
+                if _fb_entry:
+                    _fallback_resolved = {
+                        'model': _fb_entry.get('model', ''),
+                        'provider': _fb_entry.get('provider', ''),
+                        'base_url': _fb_entry.get('base_url'),
+                    }
 
             # Build kwargs defensively — guard newer params so the WebUI
             # degrades gracefully when run against an older hermes-agent build.
@@ -1592,6 +1806,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     _cached = SESSION_AGENT_CACHE.get(session_id)
                     if _cached and _cached[1] == _agent_sig:
                         agent = _cached[0]
+                        SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
                         logger.debug('[webui] Reusing cached agent for session %s', session_id)
 
                 if agent is not None:
@@ -1617,6 +1832,11 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     agent = _AIAgent(**_agent_kwargs)
                     with SESSION_AGENT_CACHE_LOCK:
                         SESSION_AGENT_CACHE[session_id] = (agent, _agent_sig)
+                        SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
+                        from api.config import SESSION_AGENT_CACHE_MAX
+                        while len(SESSION_AGENT_CACHE) > SESSION_AGENT_CACHE_MAX:
+                            evicted_sid, _ = SESSION_AGENT_CACHE.popitem(last=False)
+                            logger.debug('[webui] Evicted LRU agent from cache: %s', evicted_sid)
                     logger.debug('[webui] Created new agent for session %s', session_id)
 
             # Store agent instance for cancel/interrupt propagation
@@ -1668,6 +1888,11 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             if _personality_prompt:
                 agent.ephemeral_system_prompt = _personality_prompt
             _previous_messages = list(s.messages or [])
+            _previous_context_messages = list(_session_context_messages(s))
+            _pre_compression_count = getattr(
+                getattr(agent, 'context_compressor', None),
+                'compression_count', 0,
+            )
 
             # ── Periodic checkpoint during streaming (Issue #765) ──
             # The agent works on an internal copy of s.messages during run_conversation()
@@ -1708,10 +1933,11 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             )
             _ckpt_thread.start()
 
+            user_message = _build_native_multimodal_message(workspace_ctx, msg_text, attachments, workspace)
             result = agent.run_conversation(
-                user_message=workspace_ctx + msg_text,
+                user_message=user_message,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(s.messages),
+                conversation_history=_sanitize_messages_for_api(_previous_context_messages),
                 task_id=session_id,
                 persist_user_message=msg_text,
             )
@@ -1741,9 +1967,17 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             if _ckpt_thread is not None:
                 _ckpt_thread.join(timeout=15)
             with _agent_lock:
-                s.messages = _restore_reasoning_metadata(
+                _result_messages = result.get('messages') or _previous_context_messages
+                _next_context_messages = _restore_reasoning_metadata(
+                    _previous_context_messages,
+                    _result_messages,
+                )
+                s.context_messages = _next_context_messages
+                s.messages = _merge_display_messages_after_agent_result(
                     _previous_messages,
-                    result.get('messages') or s.messages,
+                    _previous_context_messages,
+                    _restore_reasoning_metadata(_previous_messages, _result_messages),
+                    msg_text,
                 )
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
@@ -1883,7 +2117,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 # Also detect compression via the result dict or compressor state
                 if not _compressed:
                     _compressor = getattr(agent, 'context_compressor', None)
-                    if _compressor and getattr(_compressor, 'compression_count', 0) > 0:
+                    if _compressor and getattr(_compressor, 'compression_count', 0) > _pre_compression_count:
                         _compressed = True
                 # Notify the frontend that compression happened
                 if _compressed:
@@ -1933,13 +2167,14 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 # Only tag a user message whose content relates to this turn's text
                 # (msg_text is the full message including the [Attached files: ...] suffix)
                 if attachments:
+                    display_attachments = [_attachment_name(a) for a in attachments if _attachment_name(a)]
                     for m in reversed(s.messages):
                         if m.get('role') == 'user':
                             content = str(m.get('content', ''))
                             # Match if content is part of the sent message or vice-versa
                             base_text = msg_text.split('\n\n[Attached files:')[0].strip() if '\n\n[Attached files:' in msg_text else msg_text
                             if base_text[:60] in content or content[:60] in msg_text:
-                                m['attachments'] = attachments
+                                m['attachments'] = display_attachments
                                 break
                 # Persist reasoning trace in the session so it survives reload.
                 # Must run BEFORE s.save() — otherwise the mutation lives only in
@@ -1950,6 +2185,36 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         if isinstance(_rm, dict) and _rm.get('role') == 'assistant':
                             _rm['reasoning'] = _reasoning_text
                             break
+                # Persist context window data on the session so the context-ring
+                # indicator survives a page reload (#1318). Must run BEFORE
+                # s.save() for the same reason as the reasoning trace above.
+                # The fields are captured into the SSE usage payload below; this
+                # block writes them to the session itself so GET /api/session
+                # returns them on reload instead of falling back to 0.
+                _cc_for_save = getattr(agent, 'context_compressor', None)
+                if _cc_for_save:
+                    s.context_length = getattr(_cc_for_save, 'context_length', 0) or 0
+                    s.threshold_tokens = getattr(_cc_for_save, 'threshold_tokens', 0) or 0
+                    s.last_prompt_tokens = getattr(_cc_for_save, 'last_prompt_tokens', 0) or 0
+                # Fallback: if the compressor didn't report a context_length
+                # (fresh agent, interrupted stream, or compressor missing the
+                # attribute), resolve it from the model's static metadata so
+                # the indicator can still show a meaningful percentage.
+                # Sourced from PR #1344 (@jasonjcwu) — extracted to a focused
+                # follow-up after PR #1344 was closed as superseded by #1341.
+                if not getattr(s, 'context_length', 0):
+                    try:
+                        from agent.model_metadata import get_model_context_length
+                        _resolved_cl = get_model_context_length(
+                            getattr(agent, 'model', resolved_model or '') or '',
+                            getattr(agent, 'base_url', '') or '',
+                        )
+                        if _resolved_cl:
+                            s.context_length = _resolved_cl
+                    except Exception:
+                        # Older hermes-agent builds may not expose this helper.
+                        # Better to leave context_length=0 than crash the save.
+                        pass
                 s.save()
             # Sync to state.db for /insights (opt-in setting)
             try:
@@ -1968,7 +2233,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             except Exception:
                 logger.debug("Failed to sync session to insights")
             usage = {'input_tokens': input_tokens, 'output_tokens': output_tokens, 'estimated_cost': estimated_cost}
-            # Include context window data from the agent's compressor for the UI indicator
+            # Include context window data from the agent's compressor for the UI indicator.
+            # The session-level persistence happens above (before s.save()) so the values
+            # survive a page reload; this block only populates the live SSE usage payload.
             _cc = getattr(agent, 'context_compressor', None)
             if _cc:
                 usage['context_length'] = getattr(_cc, 'context_length', 0) or 0
@@ -2029,6 +2296,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 except Exception:
                     logger.debug("Failed to unregister clarify callback")
             with _ENV_LOCK:
+                for _key, _old_value in old_profile_env.items():
+                    if _old_value is None: os.environ.pop(_key, None)
+                    else: os.environ[_key] = _old_value
                 if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
                 else: os.environ['TERMINAL_CWD'] = old_cwd
                 if old_exec_ask is None: os.environ.pop('HERMES_EXEC_ASK', None)
@@ -2348,6 +2618,63 @@ def cancel_stream(stream_id: str) -> bool:
         with _get_session_agent_lock(_cancel_session_id):
             try:
                 _cs = get_session(_cancel_session_id)
+                # ── Preserve the user's typed message before clearing pending state (#1298) ──
+                # The agent's internal messages list (where the user message was appended at
+                # the start of run_conversation()) may not have been merged back into
+                # _cs.messages yet — cancel_stream() races with the streaming thread's final
+                # _merge_display_messages_after_agent_result() call. Without this guard, the
+                # user's message is lost: pending_user_message gets cleared below, and
+                # _cs.messages still only contains messages from prior turns. The reporter
+                # of #1298 sees their typed text vanish from chat after clicking Stop.
+                #
+                # Recovery rule: if pending_user_message is set AND the latest message in
+                # _cs.messages isn't already a matching user turn, synthesize one. The
+                # match check guards against double-append when the streaming thread DID
+                # reach its merge step before cancel_stream() got the session lock.
+                #
+                # Wrapped in its own try/except so an unexpected _cs.messages shape (e.g.
+                # in unit tests using Mock sessions) cannot escape and skip the rest of
+                # the cleanup.
+                try:
+                    _pending_user = getattr(_cs, 'pending_user_message', None)
+                    _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
+                    _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
+                    _pending_started = getattr(_cs, 'pending_started_at', None) or 0
+                    _msgs_for_recovery = _cs.messages if isinstance(_cs.messages, list) else None
+                    if _pending_user and _msgs_for_recovery is not None:
+                        _last_user = None
+                        for _m in reversed(_msgs_for_recovery):
+                            if isinstance(_m, dict) and _m.get('role') == 'user':
+                                _last_user = _m
+                                break
+                        _already_persisted = False
+                        if _last_user is not None:
+                            _last_content = _last_user.get('content')
+                            _last_ts = _last_user.get('timestamp') or 0
+                            # Only treat as already-persisted if the latest user turn
+                            # was created AT OR AFTER the current turn's pending_started_at.
+                            # An earlier turn whose content happens to be a substring
+                            # (e.g. prior reply was "ok", user now types "ok please continue")
+                            # must NOT short-circuit synthesis — that would re-introduce
+                            # the data-loss bug this guard is supposed to prevent.
+                            if isinstance(_last_content, str) and _last_ts >= _pending_started:
+                                # Tolerate the workspace prefix the streaming thread prepends.
+                                if _pending_user == _last_content or _pending_user in _last_content:
+                                    _already_persisted = True
+                        if not _already_persisted:
+                            _user_turn: dict = {
+                                'role': 'user',
+                                'content': _pending_user,
+                                'timestamp': int(time.time()),
+                            }
+                            if _pending_atts:
+                                _user_turn['attachments'] = _pending_atts
+                            _msgs_for_recovery.append(_user_turn)
+                except Exception:
+                    logger.debug(
+                        "Failed to recover pending user message on cancel for %s",
+                        _cancel_session_id,
+                    )
                 _cs.active_stream_id = None
                 _cs.pending_user_message = None
                 _cs.pending_attachments = []

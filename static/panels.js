@@ -119,6 +119,11 @@ function _beginSettingsPanelSession() {
   _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
   _settingsFontSizeOnOpen = localStorage.getItem('hermes-font-size') || 'default';
   _pendingSettingsTargetPanel = null;
+  if (_settingsAppearanceAutosaveTimer) {
+    clearTimeout(_settingsAppearanceAutosaveTimer);
+    _settingsAppearanceAutosaveTimer = null;
+  }
+  _settingsAppearanceAutosaveRetryPayload = null;
   _resetSettingsPanelState();
 }
 
@@ -866,8 +871,29 @@ async function loadSkills() {
   try {
     const data = await api('/api/skills');
     _skillsData = data.skills || [];
+    // Prune collapsed state to only keep categories present in fresh data,
+    // avoiding stale keys when categories are renamed or removed server-side.
+    const liveCats = new Set(_skillsData.map(s => s.category || '(general)'));
+    for (const c of _collapsedCats) { if (!liveCats.has(c)) _collapsedCats.delete(c); }
     renderSkills(_skillsData);
   } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`; }
+}
+
+let _collapsedCats = new Set(); // persisted collapsed state across re-renders
+
+function _toggleCatCollapse(cat) {
+  if (_collapsedCats.has(cat)) _collapsedCats.delete(cat);
+  else _collapsedCats.add(cat);
+  // Toggle DOM without full re-render
+  document.querySelectorAll('.skills-category').forEach(sec => {
+    const header = sec.querySelector('.skills-cat-header');
+    if (header && header.dataset.cat === cat) {
+      const collapsed = _collapsedCats.has(cat);
+      sec.classList.toggle('collapsed', collapsed);
+      header.querySelector('.cat-chevron').style.transform = collapsed ? '' : 'rotate(90deg)';
+      sec.querySelectorAll('.skill-item').forEach(el => el.style.display = collapsed ? 'none' : '');
+    }
+  });
 }
 
 function renderSkills(skills) {
@@ -888,12 +914,19 @@ function renderSkills(skills) {
   box.innerHTML = '';
   if (!filtered.length) { box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('skills_no_match'))}</div>`; return; }
   for (const [cat, items] of Object.entries(cats).sort()) {
+    const collapsed = _collapsedCats.has(cat);
     const sec = document.createElement('div');
-    sec.className = 'skills-category';
-    sec.innerHTML = `<div class="skills-cat-header">${li('folder',12)} ${esc(cat)} <span style="opacity:.5">(${items.length})</span></div>`;
+    sec.className = 'skills-category' + (collapsed ? ' collapsed' : '');
+    const hdr = document.createElement('div');
+    hdr.className = 'skills-cat-header';
+    hdr.dataset.cat = cat;
+    hdr.innerHTML = `<span class="cat-chevron" style="display:inline-flex;transition:transform .15s;${collapsed ? '' : 'transform:rotate(90deg)'}">${li('chevron-right',12)}</span> ${esc(cat)} <span style="opacity:.5">(${items.length})</span>`;
+    hdr.onclick = () => _toggleCatCollapse(cat);
+    sec.appendChild(hdr);
     for (const skill of items.sort((a,b) => a.name.localeCompare(b.name))) {
       const el = document.createElement('div');
       el.className = 'skill-item';
+      el.style.display = collapsed ? 'none' : '';
       el.innerHTML = `<span class="skill-name">${esc(skill.name)}</span><span class="skill-desc">${esc(skill.description||'')}</span>`;
       el.onclick = () => openSkill(skill.name, el);
       sec.appendChild(el);
@@ -2211,7 +2244,7 @@ async function switchToProfile(name) {
     // ── Apply model ────────────────────────────────────────────────────────
     if (data.default_model) {
       const sel = $('modelSelect');
-      const resolved = _applyModelToDropdown(data.default_model, sel);
+      const resolved = _applyModelToDropdown(data.default_model, sel, window._activeProvider||null);
       const modelToUse = resolved || data.default_model;
       S._pendingProfileModel = modelToUse;
       // Only patch the in-memory session model if we're NOT about to replace the session
@@ -2457,6 +2490,8 @@ let _settingsFontSizeOnOpen = null; // track font size at open time for discard 
 let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
 let _currentSettingsSection = 'conversation';
+let _settingsAppearanceAutosaveTimer = null;
+let _settingsAppearanceAutosaveRetryPayload = null;
 
 function switchSettingsSection(name){
   const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='system')?name:'conversation';
@@ -2513,6 +2548,7 @@ function toggleSettings(){
 function _resetSettingsPanelState(){
   const bar=$('settingsUnsavedBar');
   if(bar) bar.style.display='none';
+  _setAppearanceAutosaveStatus('');
 }
 
 function _hideSettingsPanel(){
@@ -2534,18 +2570,9 @@ function _closeSettingsPanel(){
 
 // Revert live DOM/localStorage to what they were when the panel opened
 function _revertSettingsPreview(){
-  if(_settingsThemeOnOpen){
-    localStorage.setItem('hermes-theme', _settingsThemeOnOpen);
-    if(typeof _applyTheme==='function') _applyTheme(_settingsThemeOnOpen);
-  }
-  if(_settingsSkinOnOpen){
-    localStorage.setItem('hermes-skin', _settingsSkinOnOpen);
-    if(typeof _applySkin==='function') _applySkin(_settingsSkinOnOpen);
-  }
-  if(_settingsFontSizeOnOpen){
-    localStorage.setItem('hermes-font-size', _settingsFontSizeOnOpen);
-    if(typeof _applyFontSize==='function') _applyFontSize(_settingsFontSizeOnOpen);
-  }
+  // Appearance controls autosave immediately. Closing/discarding the settings
+  // panel must not roll back theme, skin, or font-size after the user sees the
+  // inline saved state.
 }
 
 // Show the "Unsaved changes" bar inside the settings panel
@@ -2576,6 +2603,78 @@ function _markSettingsDirty(){
   _settingsDirty = true;
 }
 
+// Apply TTS enabled state: show/hide TTS buttons on all assistant messages
+function _applyTtsEnabled(enabled){
+  document.querySelectorAll('.msg-tts-btn').forEach(btn=>{
+    btn.style.display=enabled?'':'none';
+  });
+}
+
+function _appearancePayloadFromUi(){
+  return {
+    theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
+    skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
+    font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
+  };
+}
+
+function _setAppearanceAutosaveStatus(state){
+  const el=$('settingsAppearanceAutosaveStatus');
+  if(!el) return;
+  el.className='settings-autosave-status';
+  if(!state){
+    el.textContent='';
+    return;
+  }
+  el.classList.add('is-'+state);
+  if(state==='saving'){
+    el.textContent=t('settings_autosave_saving');
+  }else if(state==='saved'){
+    el.textContent=t('settings_autosave_saved');
+  }else if(state==='failed'){
+    el.innerHTML=`<span>${esc(t('settings_autosave_failed'))}</span> <button type="button" onclick="_retryAppearanceAutosave()">${esc(t('settings_autosave_retry'))}</button>`;
+  }
+}
+
+function _rememberAppearanceSaved(payload){
+  if(!payload) return;
+  _settingsThemeOnOpen=payload.theme||localStorage.getItem('hermes-theme')||'dark';
+  _settingsSkinOnOpen=payload.skin||localStorage.getItem('hermes-skin')||'default';
+  _settingsFontSizeOnOpen=payload.font_size||localStorage.getItem('hermes-font-size')||'default';
+}
+
+function _scheduleAppearanceAutosave(){
+  const payload=_appearancePayloadFromUi();
+  // Keep discard/close behavior aligned with the new mental model: appearance
+  // changes are committed immediately instead of treated as preview-only edits.
+  _rememberAppearanceSaved(payload);
+  _settingsAppearanceAutosaveRetryPayload=payload;
+  _setAppearanceAutosaveStatus('saving');
+  if(_settingsAppearanceAutosaveTimer) clearTimeout(_settingsAppearanceAutosaveTimer);
+  _settingsAppearanceAutosaveTimer=setTimeout(()=>_autosaveAppearanceSettings(payload),350);
+}
+
+async function _autosaveAppearanceSettings(payload){
+  try{
+    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    _settingsAppearanceAutosaveRetryPayload=null;
+    _rememberAppearanceSaved(payload);
+    if(saved&&saved.font_size){
+      localStorage.setItem('hermes-font-size',saved.font_size);
+    }
+    _setAppearanceAutosaveStatus('saved');
+  }catch(e){
+    console.warn('[settings] appearance autosave failed', e);
+    _setAppearanceAutosaveStatus('failed');
+  }
+}
+
+function _retryAppearanceAutosave(){
+  const payload=_settingsAppearanceAutosaveRetryPayload||_appearancePayloadFromUi();
+  _setAppearanceAutosaveStatus('saving');
+  _autosaveAppearanceSettings(payload);
+}
+
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
@@ -2593,7 +2692,9 @@ async function loadSettingsPanel(){
     const skinSel=$('settingsSkin');
     if(skinSel) skinSel.value=skinVal;
     if(typeof _buildSkinPicker==='function') _buildSkinPicker(skinVal);
-    const fontSizeVal=localStorage.getItem('hermes-font-size')||'default';
+    const fontSizeVal=settings.font_size||localStorage.getItem('hermes-font-size')||'default';
+    localStorage.setItem('hermes-font-size',fontSizeVal);
+    if(typeof _applyFontSize==='function') _applyFontSize(fontSizeVal);
     const fontSizeSel=$('settingsFontSize');
     if(fontSizeSel) fontSizeSel.value=fontSizeVal;
     if(typeof _syncFontSizePicker==='function') _syncFontSizePicker(fontSizeVal);
@@ -2652,7 +2753,7 @@ async function loadSettingsPanel(){
       // picker renders blank for any user whose default was persisted without the
       // @-prefix — CLI-first users, legacy installs, etc.
       if(typeof _applyModelToDropdown==='function'){
-        _applyModelToDropdown(_settingsHermesDefaultModelOnOpen, modelSel);
+        _applyModelToDropdown(_settingsHermesDefaultModelOnOpen, modelSel, (models&&models.active_provider)||window._activeProvider||null);
       }else{
         modelSel.value=_settingsHermesDefaultModelOnOpen;
       }
@@ -2677,6 +2778,8 @@ async function loadSettingsPanel(){
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    const simplifiedToolCb=$('settingsSimplifiedToolCalling');
+    if(simplifiedToolCb){simplifiedToolCb.checked=settings.simplified_tool_calling!==false;simplifiedToolCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
     if(showCliCb){showCliCb.checked=!!settings.show_cli_sessions;showCliCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const syncCb=$('settingsSyncInsights');
@@ -2685,6 +2788,46 @@ async function loadSettingsPanel(){
     if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const soundCb=$('settingsSoundEnabled');
     if(soundCb){soundCb.checked=!!settings.sound_enabled;soundCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    // TTS settings (localStorage-only, no server round-trip needed)
+    const ttsEnabledCb=$('settingsTtsEnabled');
+    if(ttsEnabledCb){ttsEnabledCb.checked=localStorage.getItem('hermes-tts-enabled')==='true';ttsEnabledCb.onchange=function(){localStorage.setItem('hermes-tts-enabled',this.checked?'true':'false');_applyTtsEnabled(this.checked);};}
+    const ttsAutoReadCb=$('settingsTtsAutoRead');
+    if(ttsAutoReadCb){ttsAutoReadCb.checked=localStorage.getItem('hermes-tts-auto-read')==='true';ttsAutoReadCb.onchange=function(){localStorage.setItem('hermes-tts-auto-read',this.checked?'true':'false');};}
+    // Populate voice selector from speechSynthesis
+    const ttsVoiceSel=$('settingsTtsVoice');
+    if(ttsVoiceSel&&'speechSynthesis' in window){
+      const populateVoices=()=>{
+        const voices=speechSynthesis.getVoices();
+        const current=localStorage.getItem('hermes-tts-voice')||'';
+        ttsVoiceSel.innerHTML='<option value="">Default system voice</option>';
+        voices.forEach(v=>{
+          const opt=document.createElement('option');
+          opt.value=v.name;opt.textContent=v.name+(v.lang?' ('+v.lang+')':'');
+          if(v.name===current) opt.selected=true;
+          ttsVoiceSel.appendChild(opt);
+        });
+      };
+      populateVoices();
+      speechSynthesis.addEventListener('voiceschanged',populateVoices,{once:true});
+      ttsVoiceSel.onchange=function(){localStorage.setItem('hermes-tts-voice',this.value);};
+    }
+    // TTS rate/pitch sliders
+    const ttsRateSlider=$('settingsTtsRate');
+    const ttsRateValue=$('settingsTtsRateValue');
+    if(ttsRateSlider){
+      const savedRate=localStorage.getItem('hermes-tts-rate');
+      ttsRateSlider.value=savedRate||'1';
+      if(ttsRateValue) ttsRateValue.textContent=parseFloat(ttsRateSlider.value).toFixed(1)+'x';
+      ttsRateSlider.oninput=function(){if(ttsRateValue)ttsRateValue.textContent=parseFloat(this.value).toFixed(1)+'x';localStorage.setItem('hermes-tts-rate',this.value);};
+    }
+    const ttsPitchSlider=$('settingsTtsPitch');
+    const ttsPitchValue=$('settingsTtsPitchValue');
+    if(ttsPitchSlider){
+      const savedPitch=localStorage.getItem('hermes-tts-pitch');
+      ttsPitchSlider.value=savedPitch||'1';
+      if(ttsPitchValue) ttsPitchValue.textContent=parseFloat(ttsPitchSlider.value).toFixed(1);
+      ttsPitchSlider.oninput=function(){if(ttsPitchValue)ttsPitchValue.textContent=parseFloat(this.value).toFixed(1);localStorage.setItem('hermes-tts-pitch',this.value);};
+    }
     const notifCb=$('settingsNotificationsEnabled');
     if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_markSettingsDirty,{once:false});}
     // show_thinking has no settings panel checkbox — controlled via /reasoning show|hide
@@ -2979,6 +3122,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._soundEnabled=body.sound_enabled;
   window._notificationsEnabled=body.notifications_enabled;
   window._showThinking=body.show_thinking!==false;
+  window._simplifiedToolCalling=body.simplified_tool_calling!==false;
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._busyInputMode=body.busy_input_mode||'queue';
   window._botName=body.bot_name||'Hermes';
@@ -2999,6 +3143,7 @@ function _applySavedSettingsUi(saved, body, opts){
   _settingsHermesDefaultModelOnOpen=body.default_model||_settingsHermesDefaultModelOnOpen||'';
   // Sync window._defaultModel so newSession() uses the just-saved default without a reload (#908).
   if(body.default_model) window._defaultModel=body.default_model;
+  if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
   renderMessages();
   if(typeof syncTopbar==='function') syncTopbar();
   if(typeof renderSessionList==='function') renderSessionList();
@@ -3068,8 +3213,10 @@ async function saveSettings(andClose){
   if(sendKey) body.send_key=sendKey;
   body.theme=theme;
   body.skin=skin;
+  body.font_size=fontSize;
   body.language=language;
   body.show_token_usage=showTokenUsage;
+  body.simplified_tool_calling=!!($('settingsSimplifiedToolCalling')||{}).checked;
   body.show_cli_sessions=showCliSessions;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;

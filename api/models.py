@@ -315,8 +315,11 @@ class Session:
                  pending_user_message: str=None,
                  pending_attachments=None,
                  pending_started_at=None,
+                 context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
+                 context_length=None, threshold_tokens=None,
+                 last_prompt_tokens=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -338,8 +341,12 @@ class Session:
         self.pending_user_message = pending_user_message
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
+        self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
+        self.context_length = context_length
+        self.threshold_tokens = threshold_tokens
+        self.last_prompt_tokens = last_prompt_tokens
         self._metadata_message_count = None
 
     @property
@@ -359,6 +366,7 @@ class Session:
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
+            'context_length', 'threshold_tokens', 'last_prompt_tokens',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['messages'] = self.messages
@@ -450,6 +458,9 @@ class Session:
             'personality': self.personality,
             'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
             'compression_anchor_message_key': self.compression_anchor_message_key,
+            'context_length': self.context_length,
+            'threshold_tokens': self.threshold_tokens,
+            'last_prompt_tokens': self.last_prompt_tokens,
             'active_stream_id': self.active_stream_id,
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
@@ -767,9 +778,16 @@ def all_sessions():
             # No grace window: a 0-message Untitled session is never shown in the list
             # regardless of age. This means page refreshes and accidental New Conversation
             # clicks never leave orphan entries in the sidebar.
+            #
+            # Exception: sessions with active_stream_id set are actively streaming (#1327).
+            # #1184 deferred the first save() until the first message, so during the
+            # initial streaming turn the session still looks like Untitled+0-messages.
+            # Without this exemption, navigating away during a long first turn causes
+            # the session to vanish from the sidebar.
             result = [s for s in result if not (
                 s.get('title', 'Untitled') == 'Untitled'
                 and s.get('message_count', 0) == 0
+                and not s.get('active_stream_id')
             )]
             result = [s for s in result if not _hide_from_default_sidebar(s)]
             # Backfill: sessions created before Sprint 22 have no profile tag.
@@ -794,10 +812,12 @@ def all_sessions():
     out.sort(key=lambda s: (getattr(s, 'pinned', False), _session_sort_timestamp(s)), reverse=True)
     # Hide empty Untitled sessions from the UI entirely — kept consistent with the
     # index-path filter above. No grace window: a 0-message Untitled session is
-    # never shown regardless of age (#1171).
+    # never shown regardless of age (#1171).  Same streaming exemption as above (#1327).
     result = [s.compact(include_runtime=True, active_stream_ids=active_stream_ids) for s in out if not (
         s.title == 'Untitled'
         and len(s.messages) == 0
+        and not s.active_stream_id
+        and not s.pending_user_message
     )]
     result = [s for s in result if not _hide_from_default_sidebar(s)]
     for s in result:
@@ -833,6 +853,40 @@ def load_projects() -> list:
 def save_projects(projects) -> None:
     """Write project list to disk."""
     PROJECTS_FILE.write_text(json.dumps(projects, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+CRON_PROJECT_NAME = 'Cron Jobs'
+_CRON_PROJECT_LOCK = threading.Lock()
+
+
+def ensure_cron_project() -> str:
+    """Return the project_id of the system "Cron Jobs" project, creating it if needed.
+
+    Thread-safe and idempotent.  Returns a 12-char hex project_id string.
+    """
+    with _CRON_PROJECT_LOCK:
+        for p in load_projects():
+            if p.get('name') == CRON_PROJECT_NAME:
+                return p['project_id']
+        project_id = uuid.uuid4().hex[:12]
+        projects = load_projects()
+        projects.append({
+            'project_id': project_id,
+            'name': CRON_PROJECT_NAME,
+            'color': '#6366f1',
+            'created_at': time.time(),
+        })
+        save_projects(projects)
+        return project_id
+
+
+def is_cron_session(session_id: str, source_tag: str = None) -> bool:
+    """Return True if a session originates from a cron job."""
+    if source_tag == 'cron':
+        return True
+    sid = str(session_id or '')
+    return sid.startswith('cron_')
+
 
 
 def import_cli_session(
@@ -899,6 +953,15 @@ def get_cli_sessions() -> list:
     except ImportError:
         _cli_profile = None  # older agent -- fall back to no profile
 
+    # Memoize the cron project ID for this scan so we don't pay a lock-acquire +
+    # disk-read of projects.json per cron session in the loop below.
+    # Resolved lazily on the first cron session we encounter.
+    _cron_pid_cache = [None]  # list-as-cell so the closure can mutate
+    def _cron_pid():
+        if _cron_pid_cache[0] is None:
+            _cron_pid_cache[0] = ensure_cron_project()
+        return _cron_pid_cache[0]
+
     try:
         for row in read_importable_agent_session_rows(db_path, limit=200, log=logger, exclude_sources=None):
             sid = row['id']
@@ -937,9 +1000,12 @@ def get_cli_sessions() -> list:
                 'updated_at': raw_ts,
                 'pinned': False,
                 'archived': False,
-                'project_id': None,
+                'project_id': _cron_pid() if is_cron_session(sid, _source) else None,
                 'profile': profile,
                 'source_tag': _source,
+                'raw_source': row.get('raw_source'),
+                'session_source': row.get('session_source'),
+                'source_label': row.get('source_label'),
                 'is_cli_session': True,
             })
     except Exception as _cli_err:

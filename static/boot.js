@@ -20,6 +20,23 @@ function _isCompactWorkspaceViewport(){
   return window.matchMedia('(max-width: 900px)').matches;
 }
 
+function _syncWorkspacePanelInlineWidth(){
+  const {panel}= _workspacePanelEls();
+  if(!panel) return;
+
+  const isCompact = _isCompactWorkspaceViewport();
+  if(isCompact){
+    if(panel.style.width) panel.style.removeProperty('width');
+    return;
+  }
+
+  const saved = localStorage.getItem('hermes-panel-w');
+  if(!saved) return;
+  const parsed = parseInt(saved, 10);
+  if(Number.isNaN(parsed) || parsed <= 0) return;
+  panel.style.width = `${parsed}px`;
+}
+
 function _workspacePanelEls(){
   return {
     layout: document.querySelector('.layout'),
@@ -426,16 +443,18 @@ $('importFileInput').onchange=async(e)=>{
 };
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
 function clearPreview(){
+  // Restore directory breadcrumb after closing file preview
+  if(typeof renderBreadcrumb==='function') renderBreadcrumb();
   const closePanelAfter=_workspacePanelMode==='preview';
   const pa=$('previewArea');if(pa)pa.classList.remove('visible');
   const pi=$('previewImg');if(pi){pi.onerror=null;pi.src='';}
+  const pdf=$('previewPdfFrame');if(pdf)pdf.src='';
+  const html=$('previewHtmlIframe');if(html)html.src='';
   const pm=$('previewMd');if(pm)pm.innerHTML='';
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
-  // Restore directory breadcrumb after closing file preview
-  if(typeof renderBreadcrumb==='function') renderBreadcrumb();
   if(closePanelAfter)closeWorkspacePanel();
   else syncWorkspacePanelUI();
 }
@@ -529,7 +548,12 @@ document.addEventListener('keydown',async e=>{
     // If the current session has no messages, just focus the composer rather than
     // creating another empty session that will clutter the sidebar list (#1171).
     if(S.session&&(S.session.message_count||0)===0){$('msg').focus();return;}
-    if(!S.busy){await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();}
+    // Cmd/Ctrl+K should always create a new conversation, even while the current
+    // one is still streaming. The old !S.busy guard meant users had to wait for
+    // a long generation to finish before they could start something new — exactly
+    // the moment they want to switch context. newSession() leaves the in-flight
+    // stream running on its own session; the user just gets a fresh blank one.
+    await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
   }
   if(e.key==='Escape'){
     // Close onboarding overlay if open (skip/dismiss the wizard)
@@ -571,6 +595,7 @@ document.querySelectorAll('.suggestion').forEach(btn=>{
 });
 
 window.addEventListener('resize',()=>{
+  _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
 });
 
@@ -585,8 +610,12 @@ window.addEventListener('resize',()=>{
     if(!handle || !targetEl) return;
 
     // Restore saved width
-    const saved = localStorage.getItem(storageKey);
-    if(saved) targetEl.style.width = saved + 'px';
+    if(storageKey === 'hermes-panel-w'){
+      _syncWorkspacePanelInlineWidth();
+    }else{
+      const saved = localStorage.getItem(storageKey);
+      if(saved) targetEl.style.width = saved + 'px';
+    }
 
     let startX=0, startW=0;
 
@@ -624,6 +653,11 @@ window.addEventListener('resize',()=>{
 })();
 
 // ── Appearance helpers (theme = light/dark/system, skin = accent color) ──────
+const _THEMES=[
+  {name:'Light', value:'light', colors:['#FEFCF7','#FAF7F0','#B8860B']},
+  {name:'Dark', value:'dark', colors:['#0D0D1A','#141425','#FFD700']},
+  {name:'System', value:'system', colors:['#FEFCF7','#0D0D1A','#B8860B']},
+];
 const _SKINS=[
   {name:'Default',  colors:['#FFD700','#FFBF00','#CD7F32']},
   {name:'Ares',     colors:['#FF4444','#CC3333','#992222']},
@@ -632,8 +666,9 @@ const _SKINS=[
   {name:'Poseidon', colors:['#0EA5E9','#0284C7','#0369A1']},
   {name:'Sisyphus', colors:['#A78BFA','#8B5CF6','#7C3AED']},
   {name:'Charizard',colors:['#FB923C','#F97316','#EA580C']},
+  {name:'Sienna',   colors:['#D97757','#C06A49','#9A523A']},
 ];
-const _VALID_THEMES=new Set(['system','dark','light']);
+const _VALID_THEMES=new Set((_THEMES||[]).map(t=>t.value));
 const _VALID_SKINS=new Set((_SKINS||[]).map(s=>s.name.toLowerCase()));
 const _LEGACY_THEME_MAP={
   slate:{theme:'dark',skin:'slate'},
@@ -668,6 +703,7 @@ function _setResolvedTheme(isDark){
 
 function _applyTheme(name){
   const normalized=_normalizeAppearance(name,'default');
+  delete document.documentElement.dataset.theme;
   if(_systemThemeMq&&_onSystemThemeChange){
     _systemThemeMq.removeEventListener('change',_onSystemThemeChange);
     _systemThemeMq=null;
@@ -698,11 +734,11 @@ function _pickTheme(name){
   _applySkin(appearance.skin);
   _syncThemePicker(appearance.theme);
   _syncSkinPicker(appearance.skin);
-  if(typeof _markSettingsDirty==='function') _markSettingsDirty();
   const hidden=$('settingsTheme');
   if(hidden) hidden.value=appearance.theme;
   const skinHidden=$('settingsSkin');
   if(skinHidden) skinHidden.value=appearance.skin;
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
 
 function _pickSkin(name){
@@ -713,11 +749,11 @@ function _pickSkin(name){
   _applySkin(appearance.skin);
   _syncThemePicker(appearance.theme);
   _syncSkinPicker(appearance.skin);
-  if(typeof _markSettingsDirty==='function') _markSettingsDirty();
   const hidden=$('settingsSkin');
   if(hidden) hidden.value=appearance.skin;
   const themeHidden=$('settingsTheme');
   if(themeHidden) themeHidden.value=appearance.theme;
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
 
 function _syncThemePicker(active){
@@ -748,9 +784,9 @@ function _pickFontSize(size){
   localStorage.setItem('hermes-font-size',size);
   _applyFontSize(size);
   _syncFontSizePicker(size);
-  if(typeof _markSettingsDirty==='function') _markSettingsDirty();
   const hidden=$('settingsFontSize');
   if(hidden) hidden.value=size;
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
 
 function _syncFontSizePicker(active){
@@ -813,6 +849,7 @@ function applyBotName(){
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
     window._showThinking=s.show_thinking!==false;
+    window._simplifiedToolCalling=s.simplified_tool_calling!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._botName=s.bot_name||'Hermes';
@@ -825,6 +862,9 @@ function applyBotName(){
     _applyTheme(appearance.theme);
     localStorage.setItem('hermes-skin',appearance.skin);
     _applySkin(appearance.skin);
+    const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');
+    localStorage.setItem('hermes-font-size',fontSize);
+    _applyFontSize(fontSize);
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
         ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'))
@@ -833,6 +873,8 @@ function applyBotName(){
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
     applyBotName();
+    // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
+    if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }catch(e){
     window._sendKey='enter';
     window._showTokenUsage=false;
@@ -840,6 +882,7 @@ function applyBotName(){
     window._soundEnabled=false;
     window._notificationsEnabled=false;
     window._showThinking=true;
+    window._simplifiedToolCalling=true;
     window._sidebarDensity='compact';
     window._busyInputMode='queue';
     window._botName='Hermes';
@@ -852,6 +895,7 @@ function applyBotName(){
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
     applyBotName();
+    if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
   // Non-blocking update check (fire-and-forget, once per tab session)
   // ?test_updates=1 in URL forces banner display for testing (bypasses sessionStorage guards)
@@ -879,9 +923,12 @@ function applyBotName(){
     if(S.session) syncTopbar();
   }).catch(()=>{});
   window._modelDropdownReady=_modelDropdownReady;
-  // Pre-load workspace list so sidebar name is correct from first render
+  // Pre-load workspace list so sidebar name is correct from first render.
+  // Render the session list before restoring the saved conversation so a stale
+  // saved-session/client-side boot error cannot leave the sidebar empty forever.
   await loadWorkspaceList();
   await loadOnboardingWizard();
+  await renderSessionList();
   _initResizePanels();
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).
@@ -941,7 +988,14 @@ function applyBotName(){
   await renderSessionList();
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
-})();
+})().catch(e=>{
+  console.error('[hermes] boot failed', e);
+  try{S._bootReady=true;}catch(_){}
+  try{syncTopbar();}catch(_){}
+  try{syncWorkspacePanelState();}catch(_){}
+  try{$('emptyState').style.display='';}catch(_){}
+  try{if(typeof renderSessionList==='function') void renderSessionList();}catch(_){}
+});
 
 // Fix #822 (bfcache path): when the browser restores the page from the
 // back-forward cache, the async boot IIFE above does NOT re-run, but the

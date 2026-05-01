@@ -18,10 +18,25 @@ from urllib.parse import parse_qs
 
 logger = logging.getLogger(__name__)
 
+# Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
+# connections often end this way when a browser tab sleeps, a phone switches
+# networks, or Tailscale leaves the socket half-closed.  If these bubble to the
+# request handler, the server logs 500s and can leave CLOSE-WAIT sockets around
+# until the OS-level timeout fires.
+_CLIENT_DISCONNECT_ERRORS = (
+    BrokenPipeError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    TimeoutError,
+    OSError,
+)
+
 # ── Cron run tracking ────────────────────────────────────────────────────────
 # Track job IDs currently being executed so the frontend can poll status.
 _RUNNING_CRON_JOBS: dict[str, float] = {}  # job_id → start_timestamp
 _RUNNING_CRON_LOCK = threading.Lock()
+_CRON_OUTPUT_CONTENT_LIMIT = 8000
+_CRON_OUTPUT_HEADER_CONTEXT = 200
 
 
 def _mark_cron_running(job_id: str):
@@ -43,8 +58,43 @@ def _is_cron_running(job_id: str) -> tuple[bool, float]:
         return True, time.time() - t
 
 
+def _cron_response_marker_index(text: str) -> int:
+    """Return the start index of a markdown Response heading, if present."""
+    candidates = []
+    for heading in ("## Response", "# Response"):
+        if text.startswith(heading):
+            candidates.append(0)
+        idx = text.find(f"\n{heading}")
+        if idx >= 0:
+            candidates.append(idx + 1)
+    return min(candidates) if candidates else -1
+
+
+def _cron_output_content_window(text: str, limit: int = _CRON_OUTPUT_CONTENT_LIMIT) -> str:
+    """Return a bounded cron output window that preserves useful response text.
+
+    Cron output files can contain large skill dumps in the Prompt section. The
+    UI already extracts ``## Response`` when present, so keep that section in
+    the API payload instead of blindly returning the first ``limit`` chars.
+    """
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+
+    response_idx = _cron_response_marker_index(text)
+    if response_idx >= 0:
+        header = text[:min(_CRON_OUTPUT_HEADER_CONTEXT, response_idx)].rstrip()
+        response = text[response_idx:].lstrip("\n")
+        content = f"{header}\n...\n{response}" if header else response
+        return content[:limit]
+
+    return text[-limit:]
+
+
 def _run_cron_tracked(job):
     """Wrapper that tracks running state around cron.scheduler.run_job."""
+    from cron.scheduler import run_job  # import here — runs inside a worker thread
     try:
         run_job(job)
     finally:
@@ -328,7 +378,14 @@ def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
             or (provider_normalized and provider_normalized == active_provider)
         )
         if hint_matches_active:
-            return bare_model, True
+            # The @provider:model hint explicitly names the active provider, so this
+            # selection is intentional — not a stale cross-provider artifact. Return
+            # the full @provider:model string unchanged so downstream (resolve_model_provider
+            # in config.py) can route through the correct provider. Stripping the prefix
+            # here would collapse duplicate model IDs from different providers back to the
+            # bare ID, causing the first matching provider to win on the next UI render
+            # and the wrong provider to be used for the agent run. (#1253)
+            return model, False
 
         if _catalog_has_provider(
             provider_raw,
@@ -431,6 +488,8 @@ from api.models import (
     import_cli_session,
     get_cli_sessions,
     get_cli_session_messages,
+    ensure_cron_project,
+    is_cron_session,
 )
 from api.workspace import (
     load_workspaces,
@@ -453,6 +512,8 @@ from api.onboarding import (
     apply_onboarding_setup,
     get_onboarding_status,
     complete_onboarding,
+    get_onboarding_search,
+    apply_onboarding_search,
 )
 
 # Approval system (optional -- graceful fallback if agent not available)
@@ -486,6 +547,67 @@ except ImportError:
     _permanent_approved = set()
 
 
+# ── Approval SSE subscribers (long-connection push) ──────────────────────────
+_approval_sse_subscribers: dict[str, list[queue.Queue]] = {}
+
+
+def _approval_sse_subscribe(session_id: str) -> queue.Queue:
+    """Register an SSE subscriber for approval events on a given session."""
+    q = queue.Queue(maxsize=16)
+    with _lock:
+        _approval_sse_subscribers.setdefault(session_id, []).append(q)
+    return q
+
+
+def _approval_sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
+    """Remove an SSE subscriber."""
+    with _lock:
+        subs = _approval_sse_subscribers.get(session_id)
+        if subs and q in subs:
+            subs.remove(q)
+            if not subs:
+                _approval_sse_subscribers.pop(session_id, None)
+
+
+def _approval_sse_notify_locked(session_id: str, head: dict | None, total: int) -> None:
+    """Push an approval event to all SSE subscribers for a session.
+
+    CALLER MUST HOLD `_lock`. Snapshots the subscriber list under the held
+    lock and then calls `q.put_nowait()` on each (which is itself thread-safe).
+
+    `head` is the approval entry currently at the head of the queue (the one
+    the UI should display) — NOT the just-appended entry. With multiple
+    parallel approvals (#527), the just-appended entry is at the TAIL, but
+    `/api/approval/pending` always returns the HEAD, so SSE must match.
+
+    `total` is the total number of pending approvals.
+
+    Pass `head=None` and `total=0` when the queue has just been emptied (e.g.
+    `_handle_approval_respond` popped the last entry) so the client knows to
+    hide its approval card.
+    """
+    payload = {"pending": dict(head) if head else None, "pending_count": total}
+    subs = _approval_sse_subscribers.get(session_id, ())
+    for q in subs:
+        try:
+            q.put_nowait(payload)
+        except queue.Full:
+            pass  # drop if subscriber is slow (bounded queue prevents memory leak)
+
+
+def _approval_sse_notify(session_id: str, head: dict | None, total: int) -> None:
+    """Convenience wrapper that takes `_lock` itself.
+
+    Use only from contexts that don't already hold `_lock`. Production call
+    sites (submit_pending, _handle_approval_respond) MUST hold the lock and
+    call `_approval_sse_notify_locked` directly to avoid a notify-ordering
+    race where a later append's notify can fire before an earlier append's
+    notify (resulting in stale `pending_count`).
+    """
+    with _lock:
+        _approval_sse_notify_locked(session_id, head, total)
+
+
 def submit_pending(session_key: str, approval: dict) -> None:
     """Append a pending approval to the per-session queue.
 
@@ -494,16 +616,23 @@ def submit_pending(session_key: str, approval: dict) -> None:
       a specific entry even when multiple approvals are queued simultaneously.
     - Change the storage from a single overwriting dict value to a list, so
       parallel tool calls each get their own approval slot (fixes #527).
+    - Notify any connected SSE subscribers immediately.
     """
     entry = dict(approval)
     entry.setdefault("approval_id", uuid.uuid4().hex)
     with _lock:
-        queue = _pending.setdefault(session_key, [])
+        queue_list = _pending.setdefault(session_key, [])
         # Replace a legacy non-list value if the agent version uses the old pattern.
-        if not isinstance(queue, list):
-            _pending[session_key] = [queue]
-            queue = _pending[session_key]
-        queue.append(entry)
+        if not isinstance(queue_list, list):
+            _pending[session_key] = [queue_list]
+            queue_list = _pending[session_key]
+        queue_list.append(entry)
+        total = len(queue_list)
+        head = queue_list[0]  # /api/approval/pending always returns head
+        # Push to SSE subscribers from inside _lock so two parallel
+        # submit_pending calls can't deliver out-of-order (T2's later
+        # notify arriving before T1's earlier notify with a stale count).
+        _approval_sse_notify_locked(session_key, head, total)
     # NOTE: We do NOT call _submit_pending_raw here — that function overwrites
     # _pending[session_key] with a single dict, which would undo the list we just
     # built. The gateway blocking path uses _gateway_queues (a separate mechanism
@@ -660,9 +789,12 @@ def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
 
     if parsed.path in ("/", "/index.html"):
+        from urllib.parse import quote
+        from api.updates import WEBUI_VERSION
+        version_token = quote(WEBUI_VERSION, safe="")
         return t(
             handler,
-            _INDEX_HTML_PATH.read_text(encoding="utf-8"),
+            _INDEX_HTML_PATH.read_text(encoding="utf-8").replace("__WEBUI_VERSION__", version_token),
             content_type="text/html; charset=utf-8",
         )
 
@@ -719,9 +851,11 @@ def handle_get(handler, parsed) -> bool:
         if sw_path.exists():
             # Inject the current git-derived version as the cache name so the
             # service worker cache busts automatically on every new deploy.
+            from urllib.parse import quote
             from api.updates import WEBUI_VERSION
+            version_token = quote(WEBUI_VERSION, safe="")
             text = sw_path.read_text(encoding="utf-8").replace(
-                "__CACHE_VERSION__", WEBUI_VERSION
+                "__CACHE_VERSION__", version_token
             )
             data = text.encode("utf-8")
             handler.send_response(200)
@@ -795,6 +929,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/onboarding/status":
         return j(handler, get_onboarding_status())
 
+    if parsed.path == "/api/onboarding/search":
+        return j(handler, get_onboarding_search())
+
     if parsed.path.startswith("/static/"):
         return _serve_static(handler, parsed)
 
@@ -864,6 +1001,9 @@ def handle_get(handler, parsed) -> bool:
                 "pending_user_message": getattr(s, "pending_user_message", None),
                 "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
                 "pending_started_at": getattr(s, "pending_started_at", None),
+                "context_length": getattr(s, "context_length", 0) or 0,
+                "threshold_tokens": getattr(s, "threshold_tokens", 0) or 0,
+                "last_prompt_tokens": getattr(s, "last_prompt_tokens", 0) or 0,
             }
             # Signal to the frontend that older messages were omitted.
             # For msg_before paging, compare against the filtered set,
@@ -1124,6 +1264,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/approval/pending":
         return _handle_approval_pending(handler, parsed)
 
+    if parsed.path == "/api/approval/stream":
+        return _handle_approval_sse_stream(handler, parsed)
+
     if parsed.path == "/api/approval/inject_test":
         # Loopback-only: used by automated tests; blocked from any remote client
         if handler.client_address[0] != "127.0.0.1":
@@ -1220,6 +1363,10 @@ def handle_get(handler, parsed) -> bool:
             handler,
             {"name": get_active_profile_name(), "path": str(get_active_hermes_home())},
         )
+
+    # ── MCP Servers (GET) ──
+    if parsed.path == "/api/mcp/servers":
+        return _handle_mcp_servers_list(handler)
 
     return False  # 404
 
@@ -1632,19 +1779,6 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/workspaces/reorder":
         return _handle_workspace_reorder(handler, body)
 
-    # ── MCP Servers ──
-    if parsed.path == "/api/mcp/servers":
-        return _handle_mcp_servers_list(handler)
-
-    if parsed.path.startswith("/api/mcp/servers/") and parsed.path.count("/") == 4:
-        # DELETE /api/mcp/servers/<name>
-        name = parsed.path.split("/")[-1]
-        if handler.command == "DELETE":
-            return _handle_mcp_server_delete(handler, name)
-        # PUT /api/mcp/servers/<name>
-        if handler.command == "PUT":
-            return _handle_mcp_server_update(handler, name, body)
-
     # ── Approval (POST) ──
     if parsed.path == "/api/approval/respond":
         return _handle_approval_respond(handler, body)
@@ -1825,6 +1959,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/onboarding/complete":
         return j(handler, complete_onboarding())
+
+    if parsed.path == "/api/onboarding/search":
+        return j(handler, apply_onboarding_search(body))
 
     # ── Session pin (POST) ──
     if parsed.path == "/api/session/pin":
@@ -2190,7 +2327,7 @@ def _handle_sse_stream(handler, parsed):
             _sse(handler, event, data)
             if event in ("stream_end", "error", "cancel"):
                 break
-    except (BrokenPipeError, ConnectionResetError):
+    except _CLIENT_DISCONNECT_ERRORS:
         pass
     return True
 
@@ -2392,7 +2529,7 @@ def _handle_gateway_sse_stream(handler, parsed):
             if event_data is None:
                 break  # watcher is stopping
             _sse(handler, event_data.get('type', 'sessions_changed'), event_data)
-    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+    except _CLIENT_DISCONNECT_ERRORS:
         pass
     finally:
         watcher.unsubscribe(q)
@@ -2420,6 +2557,84 @@ def _content_disposition_value(disposition: str, filename: str) -> str:
         f'{disposition}; filename="{ascii_fallback}"; '
         f"filename*=UTF-8''{quoted_name}"
     )
+
+
+def _parse_range_header(range_header: str, file_size: int) -> tuple[int, int] | None:
+    """Parse a single HTTP bytes range into inclusive start/end offsets."""
+    if not range_header or not range_header.startswith("bytes=") or file_size < 1:
+        return None
+    spec = range_header.split("=", 1)[1].strip()
+    if "," in spec or "-" not in spec:
+        return None
+    start_s, end_s = spec.split("-", 1)
+    try:
+        if start_s == "":
+            # suffix range: bytes=-500
+            suffix_len = int(end_s)
+            if suffix_len <= 0:
+                return None
+            start = max(0, file_size - suffix_len)
+            end = file_size - 1
+        else:
+            start = int(start_s)
+            end = int(end_s) if end_s else file_size - 1
+            if start < 0:
+                return None
+            end = min(end, file_size - 1)
+        if start > end or start >= file_size:
+            return None
+        return start, end
+    except ValueError:
+        return None
+
+
+def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None):
+    """Serve a file with correct MIME/disposition and optional byte-range support."""
+    try:
+        file_size = target.stat().st_size
+    except PermissionError:
+        return bad(handler, "Permission denied", 403)
+    except Exception:
+        return bad(handler, "Could not stat file", 500)
+
+    byte_range = _parse_range_header(handler.headers.get("Range", ""), file_size)
+    if handler.headers.get("Range") and byte_range is None:
+        handler.send_response(416)
+        handler.send_header("Content-Range", f"bytes */{file_size}")
+        handler.send_header("Accept-Ranges", "bytes")
+        _security_headers(handler)
+        handler.end_headers()
+        return True
+
+    start, end = byte_range if byte_range else (0, max(0, file_size - 1))
+    content_length = end - start + 1 if file_size else 0
+    handler.send_response(206 if byte_range else 200)
+    handler.send_header("Content-Type", mime)
+    handler.send_header("Content-Length", str(content_length))
+    handler.send_header("Accept-Ranges", "bytes")
+    if byte_range:
+        handler.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+    handler.send_header("Cache-Control", cache_control)
+    handler.send_header("Content-Disposition", _content_disposition_value(disposition, target.name))
+    if csp:
+        handler.send_header("Content-Security-Policy", csp)
+    _security_headers(handler)
+    handler.end_headers()
+
+    if content_length:
+        try:
+            with target.open("rb") as f:
+                f.seek(start)
+                remaining = content_length
+                while remaining:
+                    chunk = f.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    handler.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except PermissionError:
+            return True
+    return True
 
 
 def _handle_media(handler, parsed):
@@ -2489,39 +2704,26 @@ def _handle_media(handler, parsed):
     ext = target.suffix.lower()
     mime = MIME_MAP.get(ext, "application/octet-stream")
 
-    # Only serve image types inline; everything else is a download
+    # Only serve safe media/PDF types inline when explicitly requested. Everything
+    # else remains a download. SVG is always a download (XSS risk).
     _INLINE_IMAGE_TYPES = {
         "image/png", "image/jpeg", "image/gif", "image/webp",
         "image/x-icon", "image/bmp",
     }
+    _INLINE_PREVIEW_TYPES = _INLINE_IMAGE_TYPES | {
+        "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac",
+        "audio/ogg", "audio/opus", "audio/flac",
+        "video/mp4", "video/quicktime", "video/webm", "video/ogg",
+        "application/pdf",
+    }
     _DOWNLOAD_TYPES = {"image/svg+xml"}  # SVG: XSS risk, force download
-
-    try:
-        raw_bytes = target.read_bytes()
-    except PermissionError:
-        return bad(handler, "Permission denied", 403)
-    except Exception:
-        return bad(handler, "Could not read file", 500)
-
-    handler.send_response(200)
-    handler.send_header("Content-Type", mime)
-    handler.send_header("Content-Length", str(len(raw_bytes)))
-    handler.send_header("Cache-Control", "private, max-age=3600")
-    _security_headers(handler)
-
-    if mime in _DOWNLOAD_TYPES or mime not in _INLINE_IMAGE_TYPES:
-        handler.send_header(
-            "Content-Disposition",
-            _content_disposition_value("attachment", target.name),
+    inline_preview = qs.get("inline", [""])[0] == "1"
+    disposition = "inline" if (
+        mime not in _DOWNLOAD_TYPES and (
+            mime in _INLINE_IMAGE_TYPES or (inline_preview and mime in _INLINE_PREVIEW_TYPES)
         )
-    else:
-        handler.send_header(
-            "Content-Disposition",
-            _content_disposition_value("inline", target.name),
-        )
-
-    handler.end_headers()
-    handler.wfile.write(raw_bytes)
+    ) else "attachment"
+    return _serve_file_bytes(handler, target, mime, disposition, "private, max-age=3600")
 
 
 def _handle_file_raw(handler, parsed):
@@ -2540,11 +2742,6 @@ def _handle_file_raw(handler, parsed):
         return j(handler, {"error": "not found"}, status=404)
     ext = target.suffix.lower()
     mime = MIME_MAP.get(ext, "application/octet-stream")
-    raw_bytes = target.read_bytes()
-    handler.send_response(200)
-    handler.send_header("Content-Type", mime)
-    handler.send_header("Content-Length", str(len(raw_bytes)))
-    handler.send_header("Cache-Control", "no-store")
     # Security: force download for dangerous MIME types to prevent XSS.
     # Exception: ?inline=1 permits text/html to be served inline for the
     # sandboxed workspace HTML preview iframe (sandbox="allow-scripts" with no
@@ -2552,16 +2749,7 @@ def _handle_file_raw(handler, parsed):
     inline_preview = qs.get("inline", [""])[0] == "1"
     dangerous_types = {"text/html", "application/xhtml+xml", "image/svg+xml"}
     html_inline_ok = inline_preview and mime == "text/html"
-    if force_download or (mime in dangerous_types and not html_inline_ok):
-        handler.send_header(
-            "Content-Disposition",
-            _content_disposition_value("attachment", target.name),
-        )
-    else:
-        handler.send_header(
-            "Content-Disposition",
-            _content_disposition_value("inline", target.name),
-        )
+    disposition = "attachment" if force_download or (mime in dangerous_types and not html_inline_ok) else "inline"
     # Defense-in-depth for ?inline=1 HTML: even though the workspace.js iframe
     # sets sandbox="allow-scripts", a user could be tricked into opening the
     # ?inline=1 URL directly in a top-level tab (e.g. via a chat link), which
@@ -2569,14 +2757,9 @@ def _handle_file_raw(handler, parsed):
     # CSP sandbox directive applies the same isolation server-side: without
     # allow-same-origin, the document is treated as a unique opaque origin and
     # cannot read WebUI cookies, localStorage, or postMessage to the parent.
-    if html_inline_ok:
-        # Match the iframe sandbox="allow-scripts" exactly: scripts allowed,
-        # but no allow-same-origin → unique opaque origin (no cookie/storage
-        # access even when accessed via direct URL outside the iframe).
-        handler.send_header("Content-Security-Policy", "sandbox allow-scripts")
-    handler.end_headers()
-    handler.wfile.write(raw_bytes)
-    return True
+    csp = "sandbox allow-scripts" if html_inline_ok else None
+    # _serve_file_bytes sends Content-Security-Policy when csp is set.
+    return _serve_file_bytes(handler, target, mime, disposition, "no-store", csp=csp)
 
 
 def _handle_file_read(handler, parsed):
@@ -2614,6 +2797,66 @@ def _handle_approval_pending(handler, parsed):
     if p:
         return j(handler, {"pending": dict(p), "pending_count": total})
     return j(handler, {"pending": None, "pending_count": 0})
+
+
+def _handle_approval_sse_stream(handler, parsed):
+    """SSE endpoint for real-time approval notifications.
+
+    Long-lived connection that pushes approval events the moment they arrive,
+    replacing the 1.5s polling loop.  The frontend uses EventSource and falls
+    back to HTTP polling if the connection fails.
+    """
+    sid = parse_qs(parsed.query).get("session_id", [""])[0]
+    if not sid:
+        return bad(handler, "session_id is required")
+
+    # Subscribe AND snapshot atomically under a single _lock acquisition so a
+    # submit_pending() that fires between the two cannot be lost. If we
+    # snapshot first then subscribe (the naive ordering), an approval that
+    # arrives in the gap is appended to _pending (after our snapshot) AND
+    # notified to subscribers (before we joined) — leaving the client unaware
+    # until the next event arrives.
+    q = queue.Queue(maxsize=16)
+    initial_pending = None
+    initial_count = 0
+    with _lock:
+        _approval_sse_subscribers.setdefault(sid, []).append(q)
+        q_list = _pending.get(sid)
+        if isinstance(q_list, list):
+            initial_pending = dict(q_list[0]) if q_list else None
+            initial_count = len(q_list)
+        elif q_list:
+            initial_pending = dict(q_list)
+            initial_count = 1
+
+    handler.send_response(200)
+    handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+    handler.send_header('Cache-Control', 'no-cache')
+    handler.send_header('X-Accel-Buffering', 'no')
+    handler.send_header('Connection', 'keep-alive')
+    handler.end_headers()
+
+    from api.streaming import _sse
+
+    # Push initial state immediately so the client doesn't miss anything.
+    _sse(handler, 'initial', {"pending": initial_pending, "pending_count": initial_count})
+
+    try:
+        while True:
+            try:
+                payload = q.get(timeout=30)
+            except queue.Empty:
+                # Keepalive — SSE comment line prevents proxy/CDN timeout.
+                handler.wfile.write(b': keepalive\n\n')
+                handler.wfile.flush()
+                continue
+            if payload is None:
+                break  # signal to close
+            _sse(handler, 'approval', payload)
+    except _CLIENT_DISCONNECT_ERRORS:
+        pass  # client went away — normal for long-lived connections
+    finally:
+        _approval_sse_unsubscribe(sid, q)
 
 
 def _handle_approval_inject(handler, parsed):
@@ -2735,6 +2978,48 @@ def _handle_live_models(handler, parsed):
                         ]
                 except Exception:
                     pass
+            
+            # If still no ids, try fetching from model.base_url directly (OpenAI-compat endpoint)
+            if not ids and provider == "custom":
+                _base_url = cfg.get("model", {}).get("base_url")
+                _api_key = cfg.get("model", {}).get("api_key")
+                if _base_url and _api_key:
+                    try:
+                        import urllib.request
+                        import json
+                        
+                        # Build the models endpoint URL
+                        # AxonHub and similar OpenAI-compat endpoints serve /v1/models
+                        _ep = _base_url.rstrip("/")
+                        # If base_url already ends with /v1, use /models; otherwise add /v1/models
+                        if _ep.endswith("/v1"):
+                            _models_url = f"{_ep}/models"
+                        else:
+                            _models_url = f"{_ep}/v1/models"
+                        
+                        _req = urllib.request.Request(
+                            _models_url,
+                            headers={"Authorization": f"Bearer {_api_key}"},
+                        )
+                        
+                        with urllib.request.urlopen(_req, timeout=8) as _resp:
+                            _body = json.loads(_resp.read())
+                        
+                        # Parse response: {"data": [{"id": "model1", ...}, ...]}
+                        if isinstance(_body, dict):
+                            _data = _body.get("data", [])
+                            if isinstance(_data, list):
+                                ids = [m.get("id", "") for m in _data if m.get("id")]
+                        elif isinstance(_body, list):
+                            ids = [m.get("id", m) if isinstance(m, dict) else m for m in _body]
+                        
+                        if ids:
+                            logger.debug("Live-fetched %d models from custom provider %s", len(ids), _base_url)
+                        else:
+                            logger.debug("Custom provider returned no models from %s", _base_url)
+                    
+                    except Exception as _fetch_err:
+                        logger.debug("Live fetch from custom provider failed: %s", _fetch_err)
 
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────
         # When provider_model_ids() is unavailable or returns [] for a provider
@@ -2833,7 +3118,7 @@ def _handle_cron_output(handler, parsed):
         for f in files:
             try:
                 txt = f.read_text(encoding="utf-8", errors="replace")
-                outputs.append({"filename": f.name, "content": txt[:8000]})
+                outputs.append({"filename": f.name, "content": _cron_output_content_window(txt)})
             except Exception:
                 logger.debug("Failed to read cron output file %s", f)
     return j(handler, {"job_id": job_id, "outputs": outputs})
@@ -3087,7 +3372,7 @@ def _handle_chat_start(handler, body):
     msg = str(body.get("message", "")).strip()
     if not msg:
         return bad(handler, "message is required")
-    attachments = [str(a) for a in (body.get("attachments") or [])][:20]
+    attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
     try:
         workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
     except ValueError as e:
@@ -3135,6 +3420,36 @@ def _handle_chat_start(handler, body):
     if normalized_model:
         response["effective_model"] = model
     return j(handler, response)
+
+
+def _normalize_chat_attachments(raw_attachments):
+    """Normalize attachment payloads from the browser.
+
+    Older clients send a list of filenames. Newer clients send upload result
+    objects containing name/path/mime/size so image attachments can be supplied
+    to Hermes as native multimodal inputs for the current turn.
+    """
+    normalized = []
+    if not isinstance(raw_attachments, list):
+        return normalized
+    for item in raw_attachments:
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("filename") or "").strip()
+            path = str(item.get("path") or "").strip()
+            mime = str(item.get("mime") or "").strip()
+            att = {"name": name or path, "path": path, "mime": mime}
+            size = item.get("size")
+            if isinstance(size, int):
+                att["size"] = size
+            is_image = item.get("is_image")
+            if isinstance(is_image, bool):
+                att["is_image"] = is_image
+            normalized.append(att)
+        else:
+            value = str(item).strip()
+            if value:
+                normalized.append({"name": value, "path": "", "mime": ""})
+    return normalized
 
 
 def _handle_chat_sync(handler, body):
@@ -3207,14 +3522,20 @@ def _handle_chat_sync(handler, body):
                 "write_file, read_file, search_files, terminal workdir, and patch. "
                 "Never fall back to a hardcoded path when this tag is present."
             )
-            from api.streaming import _sanitize_messages_for_api, _restore_reasoning_metadata
+            from api.streaming import (
+                _merge_display_messages_after_agent_result,
+                _restore_reasoning_metadata,
+                _sanitize_messages_for_api,
+                _session_context_messages,
+            )
 
             _previous_messages = list(s.messages or [])
+            _previous_context_messages = list(_session_context_messages(s))
 
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(s.messages),
+                conversation_history=_sanitize_messages_for_api(_previous_context_messages),
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
@@ -3233,9 +3554,17 @@ def _handle_chat_sync(handler, body):
             else:
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
     with _get_session_agent_lock(s.session_id):
-        s.messages = _restore_reasoning_metadata(
+        _result_messages = result.get("messages") or _previous_context_messages
+        _next_context_messages = _restore_reasoning_metadata(
+            _previous_context_messages,
+            _result_messages,
+        )
+        s.context_messages = _next_context_messages
+        s.messages = _merge_display_messages_after_agent_result(
             _previous_messages,
-            result.get("messages") or s.messages,
+            _previous_context_messages,
+            _restore_reasoning_metadata(_previous_messages, _result_messages),
+            msg,
         )
         # Only auto-generate title when still default; preserves user renames
         if s.title == "Untitled":
@@ -3321,7 +3650,6 @@ def _handle_cron_run(handler, body):
     if not job_id:
         return bad(handler, "job_id required")
     from cron.jobs import get_job
-    from cron.scheduler import run_job
 
     job = get_job(job_id)
     if not job:
@@ -3594,6 +3922,16 @@ def _handle_approval_respond(handler, body):
         elif queue:
             # Legacy single-dict value.
             pending = _pending.pop(sid, None)
+        # Notify SSE subscribers of the new head (or empty state) so the UI
+        # surfaces any trailing approvals that were queued behind this one
+        # without waiting for the next submit_pending. Without this, a parallel
+        # tool-call scenario (#527) would leave the second approval invisible
+        # in the SSE path until the next event ever fired (the agent thread
+        # would be parked indefinitely from the user's perspective).
+        if isinstance(_pending.get(sid), list) and _pending[sid]:
+            _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
+        else:
+            _approval_sse_notify_locked(sid, None, 0)
 
     if pending:
         keys = pending.get("pattern_keys") or [pending.get("pattern_key", "")]
@@ -3861,6 +4199,7 @@ def _handle_session_compress(handler, body):
                 return bad(handler, "Session was modified during compression; please retry.", 409)
 
             s.messages = compressed
+            s.context_messages = compressed
             s.tool_calls = []
             s.active_stream_id = None
             s.pending_user_message = None
@@ -4006,6 +4345,7 @@ def _handle_session_import_cli(handler, body):
     created_at = None
     updated_at = None
     cli_title = None
+    cli_source_tag = None
     for cs in get_cli_sessions():
         if cs["session_id"] == sid:
             profile = cs.get("profile")
@@ -4013,10 +4353,16 @@ def _handle_session_import_cli(handler, body):
             created_at = cs.get("created_at")
             updated_at = cs.get("updated_at")
             cli_title = cs.get("title")
+            cli_source_tag = cs.get("source_tag")
             break
 
     # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
     title = cli_title or title_from(msgs, "CLI Session")
+
+    # Auto-assign cron sessions to the dedicated "Cron Jobs" project (#1079)
+    cron_project_id = None
+    if is_cron_session(sid, cli_source_tag):
+        cron_project_id = ensure_cron_project()
 
     s = import_cli_session(
         sid,
@@ -4027,6 +4373,8 @@ def _handle_session_import_cli(handler, body):
         created_at=created_at,
         updated_at=updated_at,
     )
+    if cron_project_id:
+        s.project_id = cron_project_id
     s.is_cli_session = True
     s._cli_origin = sid
     s.save(touch_updated_at=False)

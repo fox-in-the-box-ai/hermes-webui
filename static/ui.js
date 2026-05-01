@@ -51,6 +51,43 @@ function _setCompressionSessionLock(sid){
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+/**
+ * Render fenced code blocks inside user messages.
+ * Extracts ```…``` fences, replaces them with placeholders,
+ * escapes remaining text as plain HTML, then restores code blocks
+ * with the same <pre><code> pipeline used by renderMd().
+ * All non-fenced text stays escaped (no bold/italic/link interpretation).
+ */
+function _renderUserFencedBlocks(text){
+  const stash=[];
+  let s=String(text||'');
+  // Extract fenced code blocks → stash, replace with null-token placeholder
+  s=s.replace(/```([a-zA-Z0-9_+-]*)\n([\s\S]*?)```/g,(_,lang,code)=>{
+    lang=(lang||'').trim().toLowerCase();
+    // Remove one trailing newline if present (the fence consumes its own)
+    if(code.endsWith('\n')) code=code.slice(0,-1);
+    const h=lang?`<div class="pre-header">${esc(lang)}</div>`:'';
+    const langAttr=lang?` class="language-${esc(lang)}"`:'';
+    if(lang==='diff'||lang==='patch'){
+      const colored=esc(code).split('\n').map(line=>{
+        if(line.startsWith('@@')) return `<span class="diff-line diff-hunk">${line}</span>`;
+        if(line.startsWith('+')) return `<span class="diff-line diff-plus">${line}</span>`;
+        if(line.startsWith('-')) return `<span class="diff-line diff-minus">${line}</span>`;
+        return `<span class="diff-line">${line}</span>`;
+      }).join('\n');
+      stash.push(`${h}<pre class="diff-block"><code${langAttr}>${colored}</code></pre>`);
+    } else {
+      stash.push(`${h}<pre><code${langAttr}>${esc(code)}</code></pre>`);
+    }
+    return '\x00UF'+(stash.length-1)+'\x00';
+  });
+  // Escape remaining plain text and convert newlines to <br>
+  s=esc(s).replace(/\n/g,'<br>');
+  // Restore stashed code blocks
+  s=s.replace(/\x00UF(\d+)\x00/g,(_,i)=>stash[+i]);
+  return s;
+}
+
 /* ── Image lightbox — click any .msg-media-img to enlarge ─────────────────── */
 function _openImgLightbox(src, alt) {
   const lb = document.createElement('div');
@@ -88,24 +125,138 @@ document.addEventListener('click', e => {
 });
 
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
+const _PDF_EXTS=/\.pdf$/i;
+const _HTML_EXTS=/\.(html?|htm)$/i;
 const _ARCHIVE_EXTS=/\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz)$/i;
+const _SVG_EXTS=/\.svg$/i;
+const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm|oga)$/i;
+const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
+const _CSV_EXTS=/\.csv$/i;
+const _EXCALIDRAW_EXTS=/\.excalidraw$/i;
+// ── Media playback speed controls ─────────────────────────────────────────
+const MEDIA_PLAYBACK_RATES=[0.5,0.75,1,1.25,1.5,2];
+const MEDIA_PLAYBACK_STORAGE_KEY='hermes-media-playback-rate';
+function _getStoredMediaPlaybackRate(){
+  try{
+    const raw=localStorage.getItem(MEDIA_PLAYBACK_STORAGE_KEY);
+    const rate=Number(raw);
+    return MEDIA_PLAYBACK_RATES.includes(rate)?rate:1;
+  }catch(_){return 1;}
+}
+function _setStoredMediaPlaybackRate(rate){
+  if(!MEDIA_PLAYBACK_RATES.includes(rate)) return;
+  try{localStorage.setItem(MEDIA_PLAYBACK_STORAGE_KEY,String(rate));}catch(_){}
+}
+function _syncMediaSpeedButtons(editor, rate){
+  if(!editor) return;
+  editor.querySelectorAll('.media-speed-btn').forEach(b=>{
+    const active=Number(b.dataset.rate)===rate;
+    b.classList.toggle('active',active);
+    b.setAttribute('aria-pressed',active?'true':'false');
+  });
+}
+function _applyMediaPlaybackRate(media, rate=_getStoredMediaPlaybackRate()){
+  if(!media) return;
+  media.playbackRate=rate;
+  _syncMediaSpeedButtons(media.closest('.msg-media-editor,.preview-media-wrap'),rate);
+}
+function _mediaKindForName(name=''){
+  const clean=String(name||'').split('?')[0].toLowerCase();
+  if(_AUDIO_EXTS.test(clean)) return 'audio';
+  if(_VIDEO_EXTS.test(clean)) return 'video';
+  if(_IMAGE_EXTS.test(clean)) return 'image';
+  return '';
+}
+function _mediaSpeedControlsHtml(kind, label){
+  const safeLabel=esc(label||kind||'media');
+  const current=_getStoredMediaPlaybackRate();
+  return `<div class="media-speed-controls" role="group" aria-label="Playback speed for ${safeLabel}">${MEDIA_PLAYBACK_RATES.map(rate=>`<button type="button" class="media-speed-btn${rate===current?' active':''}" data-rate="${rate}" aria-pressed="${rate===current?'true':'false'}">${rate}×</button>`).join('')}</div>`;
+}
+function _mediaPlayerHtml(kind, src, name, extra=''){
+  const safeName=esc(name||'media');
+  const safeSrc=esc(src);
+  const tag=kind==='video'
+    ? `<video class="msg-media-player msg-media-video" src="${safeSrc}" controls preload="metadata" playsinline title="${safeName}"></video>`
+    : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
+  return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span>${extra}</div>${_mediaSpeedControlsHtml(kind,safeName)}</div>`;
+}
+function _renderAttachmentHtml(fname, url){
+  const kind=_mediaKindForName(fname);
+  if(kind==='image') return `<img class="msg-media-img" src="${esc(url)}" alt="${esc(fname)}" loading="lazy">`;
+  if(kind==='audio'||kind==='video') return _mediaPlayerHtml(kind,url,fname);
+  return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
+}
+document.addEventListener('click', e => {
+  const btn=e.target&&e.target.closest?e.target.closest('.media-speed-btn'):null;
+  if(!btn) return;
+  const editor=btn.closest('.msg-media-editor,.preview-media-wrap');
+  if(!editor) return;
+  const media=editor.querySelector('audio,video');
+  if(!media) return;
+  const rate=Number(btn.dataset.rate)||1;
+  _setStoredMediaPlaybackRate(rate);
+  _applyMediaPlaybackRate(media,rate);
+});
+document.addEventListener("loadedmetadata", e=>{
+  if(e.target&&e.target.matches&&e.target.matches('.msg-media-player,audio,video')){
+    _applyMediaPlaybackRate(e.target);
+  }
+},true);
+function _initMediaPlaybackObserver(){
+  if(!document.body||window._mediaPlaybackObserver) return;
+  window._mediaPlaybackObserver=new MutationObserver(records=>{
+    for(const rec of records){
+      for(const node of rec.addedNodes||[]){
+        if(!node||node.nodeType!==1) continue;
+        const media=[];
+        if(node.matches&&node.matches('audio,video')) media.push(node);
+        if(node.querySelectorAll) media.push(...node.querySelectorAll('audio,video'));
+        media.forEach(m=>_applyMediaPlaybackRate(m));
+      }
+    }
+  });
+  window._mediaPlaybackObserver.observe(document.body,{childList:true,subtree:true});
+  document.querySelectorAll('audio,video').forEach(m=>_applyMediaPlaybackRate(m));
+}
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',_initMediaPlaybackObserver);
+else _initMediaPlaybackObserver();
+setTimeout(_initMediaPlaybackObserver,0);
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
+window._configuredModelBadges=window._configuredModelBadges||{};
 
 // ── Smart model resolver ────────────────────────────────────────────────────
 // Finds the best matching option value in a <select> for a given model ID.
 // Handles mismatches like 'claude-sonnet-4-6' vs 'anthropic/claude-sonnet-4.6'.
-// Returns the matched option's value (already in the list), or null if no match.
-function _findModelInDropdown(modelId, sel){
+// When a preferred provider is supplied, duplicate normalized IDs prefer that
+// provider's option so Settings/profile rehydration doesn't snap back to the
+// first colliding entry.
+function _getOptionProviderId(opt){
+  if(!opt) return '';
+  const group=opt.parentElement;
+  if(group && group.tagName==='OPTGROUP' && group.dataset && group.dataset.provider){
+    return group.dataset.provider;
+  }
+  const value=String(opt.value||'');
+  if(value.startsWith('@') && value.includes(':')) return value.slice(1,value.indexOf(':'));
+  return '';
+}
+function _findModelInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
-  const opts=Array.from(sel.options).map(o=>o.value);
-  // 1. Exact match
-  if(opts.includes(modelId)) return modelId;
-  // 2. Normalize: lowercase, strip namespace prefix, replace hyphens→dots
-  // Also strip @provider: prefix from deduplicated model IDs (#1228).
+  const options=Array.from(sel.options);
+  const opts=options.map(o=>o.value);
+  // 1. Normalize: lowercase, strip namespace prefix, replace hyphens→dots.
+  // Also strip @provider: prefix from deduplicated model IDs (#1228, #1313).
   const norm=s=>s.toLowerCase().replace(/^[^/]+\//,'').replace(/^@([^:]+:)+/,'').replace(/-/g,'.');
   const target=norm(modelId);
+  const preferred=String(preferredProviderId||'').toLowerCase();
+  if(preferred){
+    const providerMatch=options.find(o=>norm(o.value)===target && _getOptionProviderId(o).toLowerCase()===preferred);
+    if(providerMatch) return providerMatch.value;
+  }
+  // 2. Exact match
+  if(opts.includes(modelId)) return modelId;
   const exact=opts.find(o=>norm(o)===target);
   if(exact) return exact;
   // 3. Prefix/substring: require the candidate to start with the FULL normalized target
@@ -121,9 +272,9 @@ function _findModelInDropdown(modelId, sel){
 
 // Set the model picker to the best match for modelId.
 // Returns the resolved value that was actually set, or null if nothing matched.
-function _applyModelToDropdown(modelId, sel){
+function _applyModelToDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
-  const resolved=_findModelInDropdown(modelId,sel);
+  const resolved=_findModelInDropdown(modelId,sel,preferredProviderId);
   if(resolved){
     sel.value=resolved;
     if(sel.id==='modelSelect' && typeof syncModelChip==='function') syncModelChip();
@@ -145,6 +296,7 @@ async function populateModelDropdown(){
     // Store default model so newSession() can apply it (#872).
     // Per-page-load — not synced across browser tabs.
     window._defaultModel=data.default_model||null;
+    window._configuredModelBadges=data.configured_model_badges||{};
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
@@ -163,7 +315,7 @@ async function populateModelDropdown(){
     }
     // Set default model from server if no localStorage preference
     if(data.default_model && !localStorage.getItem('hermes-webui-model')){
-      _applyModelToDropdown(data.default_model, sel);
+      _applyModelToDropdown(data.default_model, sel, data.active_provider||null);
     }
     if(typeof syncModelChip==='function') syncModelChip();
     // Kick off a background live-model fetch for the active provider.
@@ -306,6 +458,33 @@ function _selectedModelOption(){
   return sel.options[sel.selectedIndex]||null;
 }
 
+function _normalizeConfiguredModelKey(modelId){
+  let s=String(modelId||'').trim().toLowerCase();
+  if(s.startsWith('@')&&s.includes(':')) s=s.substring(s.indexOf(':')+1);
+  if(s.includes('/')) s=s.split('/').pop();
+  return s.replace(/-/g,'.');
+}
+
+function _getConfiguredModelBadge(modelId,badgeMap,providerId){
+  const map=badgeMap||window._configuredModelBadges||{};
+  if(!modelId||!map) return null;
+  const provider=String(providerId||'').toLowerCase();
+  const exact=map[modelId];
+  if(exact && (!provider || !exact.provider || String(exact.provider).toLowerCase()===provider)) return exact;
+  const targetNorm=_normalizeConfiguredModelKey(modelId);
+  const matches=[];
+  for(const [candidate,badge] of Object.entries(map)){
+    if(_normalizeConfiguredModelKey(candidate)===targetNorm) matches.push(badge);
+  }
+  if(!matches.length) return null;
+  if(provider){
+    const providerMatch=matches.find(badge=>String(badge&&badge.provider||'').toLowerCase()===provider);
+    if(providerMatch) return providerMatch;
+    return matches.length===1 ? matches[0] : null;
+  }
+  return matches[0];
+}
+
 function syncModelChip(){
   const sel=$('modelSelect');
   const chip=$('composerModelChip');
@@ -313,7 +492,11 @@ function syncModelChip(){
   const dd=$('composerModelDropdown');
   if(!sel||!chip||!label) return;
   // Don't show a model label until boot has finished loading to prevent flash of wrong default
-  if(!S._bootReady){ label.textContent=''; chip.title='Conversation model'; return; }
+  if(!S._bootReady){
+    label.textContent='';
+    chip.title='Conversation model';
+    return;
+  }
   const opt=_selectedModelOption();
   label.textContent=opt?opt.textContent:getModelLabel(sel.value||'');
   chip.title=sel.value||'Conversation model';
@@ -339,15 +522,29 @@ function renderModelDropdown(){
   if(!dd||!sel) return;
   // Store model data for filtering
   const _modelData=[];
+  const _badgeMap=window._configuredModelBadges||{};
   for(const child of Array.from(sel.children)){
     if(child.tagName==='OPTGROUP'){
+      const providerId=child.dataset&&child.dataset.provider?child.dataset.provider:'';
       for(const opt of Array.from(child.children)){
-        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value),group:child.label||''});
+        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value),group:child.label||'',badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId)});
       }
     }
     if(child.tagName==='OPTION'){
-      _modelData.push({value:child.value,name:esc(child.textContent||getModelLabel(child.value)),id:esc(child.value),group:''});
+      _modelData.push({value:child.value,name:esc(child.textContent||getModelLabel(child.value)),id:esc(child.value),group:'',badge:_getConfiguredModelBadge(child.value,_badgeMap)});
     }
+  }
+  const _existingConfiguredKeys=new Set(_modelData.map(existing=>_normalizeConfiguredModelKey(existing.value)));
+  for(const [modelId,badge] of Object.entries(_badgeMap)){
+    if(_existingConfiguredKeys.has(_normalizeConfiguredModelKey(modelId))) continue;
+    _modelData.push({
+      value:modelId,
+      name:esc(getModelLabel(modelId)),
+      id:esc(modelId),
+      group:'',
+      badge,
+    });
+    _existingConfiguredKeys.add(_normalizeConfiguredModelKey(modelId));
   }
   // Create search input FIRST before filterModels definition
   const _scopeNote=document.createElement('div');
@@ -367,6 +564,15 @@ function renderModelDropdown(){
   _custRow.innerHTML=`<input class="model-custom-input" type="text" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off"><button class="model-custom-btn" title="Use this model">${li('plus',12)}</button>`;
   const _ci=_custRow.querySelector('.model-custom-input');
   const _cb=_custRow.querySelector('.model-custom-btn');
+  const _configuredRank=(badge)=>{
+    if(!badge) return Number.POSITIVE_INFINITY;
+    if(badge.role==='primary') return 0;
+    if(badge.role==='fallback'){
+      const m=String(badge.label||'').match(/fallback\s+(\d+)/i);
+      return m?Number(m[1]):999;
+    }
+    return 500;
+  };
   // Filter function (defined AFTER _searchRow and _cust* are created)
   const _filterModels=(term)=>{
     term=term.trim().toLowerCase();
@@ -378,6 +584,16 @@ function renderModelDropdown(){
         found.add(m.value);
       }
     }
+    const matches=(m)=>!term||found.has(m.value);
+    const configuredModels=_modelData
+      .filter(m=>m.badge&&matches(m))
+      .sort((a,b)=>{
+        const configuredRankA=_configuredRank(a.badge);
+        const configuredRankB=_configuredRank(b.badge);
+        if(configuredRankA!==configuredRankB) return configuredRankA-configuredRankB;
+        return a.name.localeCompare(b.name);
+      });
+    const configuredIds=new Set(configuredModels.map(m=>m.value));
     // Clear and rebuild
     dd.innerHTML='';
     // Add search and custom elements first (CRITICAL: must be before models)
@@ -385,23 +601,37 @@ function renderModelDropdown(){
     dd.appendChild(_searchRow);
     dd.appendChild(_custSep);
     dd.appendChild(_custRow);
-    // Add models matching filter
-    let _lastGroup=null;
-    for(const m of _modelData){
-      if(!term||found.has(m.value)){
-        if(m.group&&m.group!==_lastGroup){
-          const heading=document.createElement('div');
-          heading.className='model-group';
-          heading.textContent=m.group;
-          dd.appendChild(heading);
-          _lastGroup=m.group;
-        }
+    if(configuredModels.length){
+      const configuredHeading=document.createElement('div');
+      configuredHeading.className='model-group';
+      configuredHeading.textContent=t('model_group_configured')||'Configured';
+      dd.appendChild(configuredHeading);
+      for(const m of configuredModels){
         const row=document.createElement('div');
         row.className='model-opt'+(m.value===sel.value?' active':'');
-        row.innerHTML=`<span class="model-opt-name">${m.name}</span><span class="model-opt-id">${m.id}</span>`;
+        const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}</div><span class="model-opt-id">${m.id}</span>`;
         row.onclick=()=>selectModelFromDropdown(m.value);
         dd.appendChild(row);
       }
+    }
+    // Add remaining models matching filter
+    let _lastGroup=null;
+    for(const m of _modelData){
+      if(configuredIds.has(m.value)||!matches(m)) continue;
+      if(m.group&&m.group!==_lastGroup){
+        const heading=document.createElement('div');
+        heading.className='model-group';
+        heading.textContent=m.group;
+        dd.appendChild(heading);
+        _lastGroup=m.group;
+      }
+      const row=document.createElement('div');
+      row.className='model-opt'+(m.value===sel.value?' active':'');
+      const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}</div><span class="model-opt-id">${m.id}</span>`;
+      row.onclick=()=>selectModelFromDropdown(m.value);
+      dd.appendChild(row);
     }
     // Show "No results" if filtered and nothing matched
     if(term&&found.size===0){
@@ -620,9 +850,12 @@ function _syncCtxIndicator(usage){
   const wrap=$('ctxIndicatorWrap');
   const el=$('ctxIndicator');
   if(!el)return;
+  // Use input_tokens as fallback when last_prompt_tokens is not available
   const promptTok=usage.last_prompt_tokens||usage.input_tokens||0;
   const totalTok=(usage.input_tokens||0)+(usage.output_tokens||0);
-  const ctxWindow=usage.context_length||0;
+  // Default context window to 128K when not provided by backend
+  const DEFAULT_CTX=128*1024;
+  const ctxWindow=usage.context_length||DEFAULT_CTX;
   const cost=usage.estimated_cost;
   // Show indicator whenever we have any usage data (tokens or cost)
   if(!promptTok&&!totalTok&&!cost){
@@ -630,8 +863,8 @@ function _syncCtxIndicator(usage){
     return;
   }
   if(wrap) wrap.style.display='';
-  const hasCtxWindow=!!(promptTok&&ctxWindow);
-  const pct=hasCtxWindow?Math.min(100,Math.round((promptTok/ctxWindow)*100)):0;
+  const hasPromptTok=!!promptTok;
+  const pct=hasPromptTok?Math.min(100,Math.round((promptTok/ctxWindow)*100)):0;
   const ring=$('ctxRingValue');
   const center=$('ctxPercent');
   const usageLine=$('ctxTooltipUsage');
@@ -643,7 +876,8 @@ function _syncCtxIndicator(usage){
     ring.style.strokeDasharray=String(circumference);
     ring.style.strokeDashoffset=String(circumference*(1-pct/100));
   }
-  if(center) center.textContent=hasCtxWindow?String(pct):'\u00b7';
+  if(center) center.textContent=hasPromptTok?String(pct):'\u00b7';
+  const hasExplicitCtx=!!usage.context_length;
   el.classList.toggle('ctx-mid',pct>50&&pct<=75);
   el.classList.toggle('ctx-high',pct>75);
   // ── Compress affordance (#524) ──
@@ -670,11 +904,12 @@ function _syncCtxIndicator(usage){
       compressWrap.style.display='none';
     }
   }
-  let label=hasCtxWindow?`Context window ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
+  let label=hasPromptTok?`Context window ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
+  if(!hasExplicitCtx&&hasPromptTok) label+=' (est. 128K)';
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
   el.setAttribute('aria-label',label);
-  if(usageLine) usageLine.textContent=hasCtxWindow?`${pct}% used (${Math.max(0,100-pct)}% left)`:`${_fmtTokens(totalTok)} tokens used`;
-  if(tokensLine) tokensLine.textContent=hasCtxWindow?`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
+  if(usageLine) usageLine.textContent=hasPromptTok?`${pct}% used (${Math.max(0,100-pct)}% left)`:`${_fmtTokens(totalTok)} tokens used`;
+  if(tokensLine) tokensLine.textContent=hasPromptTok?`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
   const threshold=usage.threshold_tokens||0;
   if(thresholdLine){
     if(threshold&&ctxWindow){
@@ -695,6 +930,30 @@ function _syncCtxIndicator(usage){
     }
   }
 }
+
+// ── Touch support: toggle context tooltip on tap (#524) ──
+// On mobile, hover doesn't work — allow tap on the context ring button
+// to toggle the tooltip visibility so the compress affordance is reachable.
+document.addEventListener('DOMContentLoaded',function(){
+  const wrap=document.getElementById('ctxIndicatorWrap');
+  const tooltip=document.getElementById('ctxTooltip');
+  if(!wrap||!tooltip)return;
+  const btn=document.getElementById('ctxIndicator');
+  if(!btn)return;
+  btn.addEventListener('click',function(e){
+    e.stopPropagation();
+    const isOpen=tooltip.classList.contains('ctx-tooltip-active');
+    tooltip.classList.toggle('ctx-tooltip-active',!isOpen);
+    tooltip.setAttribute('aria-hidden',String(isOpen));
+  });
+  // Close on outside tap
+  document.addEventListener('click',function(){
+    tooltip.classList.remove('ctx-tooltip-active');
+    tooltip.setAttribute('aria-hidden','true');
+  },{passive:true});
+  // Prevent tooltip click from closing itself
+  tooltip.addEventListener('click',function(e){e.stopPropagation();});
+});
 
 function scrollIfPinned(){
   if(!_scrollPinned) return;
@@ -868,12 +1127,17 @@ function renderMd(raw){
   const fence_stash=[];
   s=s.replace(/```([\s\S]*?)```/g,(_,raw)=>{
     const m=raw.match(/^(\w[\w+-]*)\n?([\s\S]*)$/);
-    if(m&&m[1].trim().toLowerCase()==='mermaid'){
+    const lang=m?(m[1]||'').trim().toLowerCase():'';
+    const code=m?m[2]:raw.replace(/^\n?/,'');
+    const codeLines=code.split('\n');
+    const firstCodeLine=codeLines.find(line=>line.trim())||'';
+    const firstMermaidLine=codeLines.map(line=>line.trim()).find(line=>line&&!line.startsWith('%%'))||'';
+    const looksLikeLineNumberedToolOutput=/^\s*\d+\|/.test(firstCodeLine);
+    const looksLikeMermaidStart=firstMermaidLine==='---'||/^(graph|flowchart|sequenceDiagram|classDiagram|classDiagram-v2|stateDiagram|stateDiagram-v2|erDiagram|journey|gantt|pie|gitGraph|mindmap|timeline|quadrantChart|requirementDiagram|C4Context|C4Container|C4Component|C4Dynamic|c4Context|c4Container|c4Component|c4Dynamic|sankey-beta|block-beta|packet-beta|xychart-beta|kanban|architecture-beta)\b/.test(firstMermaidLine);
+    if(lang==='mermaid'&&!looksLikeLineNumberedToolOutput&&looksLikeMermaidStart){
       const id='mermaid-'+Math.random().toString(36).slice(2,10);
-      _preBlock_stash.push(`<div class="mermaid-block" data-mermaid-id="${id}">${esc(m[2].trim())}</div>`);
+      _preBlock_stash.push(`<div class="mermaid-block" data-mermaid-id="${id}">${esc(code.trim())}</div>`);
     } else {
-      const lang=m?(m[1]||'').trim().toLowerCase():'';
-      const code=m?m[2]:raw.replace(/^\n?/,'');
       const h=lang?`<div class="pre-header">${esc(lang)}</div>`:'';
       const langAttr=lang?` class="language-${esc(lang)}"`:'';
       // For diff/patch blocks, wrap each line in a colored span
@@ -890,6 +1154,16 @@ function renderMd(raw){
         const rawCode=esc(code.replace(/\n$/,''));
         const blockId='tree-'+Math.random().toString(36).slice(2,10);
         _preBlock_stash.push(`<div class="code-tree-wrap" data-raw="${rawCode.replace(/"/g,'&quot;')}" data-lang="${lang}" id="${blockId}">${h}<pre class="tree-raw-view"><code${langAttr}>${rawCode}</code></pre></div>`);
+      // CSV blocks → render as styled table
+      } else if(lang==='csv'){
+        const rows=code.replace(/\n$/,'').split('\n').filter(r=>r.trim());
+        if(rows.length>=2){
+          const headers=rows[0].split(',').map(c=>c.trim());
+          const body=rows.slice(1).map(r=>'<tr>'+r.split(',').map(c=>`<td>${esc(c.trim())}</td>`).join('')+'</tr>').join('');
+          _preBlock_stash.push(`${h}<div class="csv-table-wrap"><table class="csv-table"><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>`);
+        } else {
+          _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
+        }
       } else {
         _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
       }
@@ -966,7 +1240,7 @@ function renderMd(raw){
   s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
   s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
-  s=s.replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
+  s=s.replace(/^###### (.+)$/gm,(_,t)=>`<h6>${inlineMd(t)}</h6>`).replace(/^##### (.+)$/gm,(_,t)=>`<h5>${inlineMd(t)}</h5>`).replace(/^#### (.+)$/gm,(_,t)=>`<h4>${inlineMd(t)}</h4>`).replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
   // (Blockquotes are handled by the pre-pass at the top of renderMd, before
   // fence_stash. The per-line passes below never see > prefixes.)
@@ -1151,6 +1425,24 @@ function renderMd(raw){
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
     const ref=media_stash[+i];
+    // Keep this logic self-contained: some tests extract renderMd() alone and
+    // execute it in node, without the top-level helper functions from ui.js.
+    const mediaKindForName=(name='')=>{
+      const clean=String(name||'').split('?')[0].toLowerCase();
+      if(/\.(mp3|wav|m4a|aac|ogg|oga|opus|flac)$/i.test(clean)) return 'audio';
+      if(/\.(mp4|mov|m4v|webm|ogv|avi|mkv)$/i.test(clean)) return 'video';
+      if(_IMAGE_EXTS.test(clean)) return 'image';
+      return '';
+    };
+    const mediaPlayerHtml=(kind,src,name)=>{
+      if(typeof _mediaPlayerHtml==='function') return _mediaPlayerHtml(kind,src,name);
+      const safeName=esc(name||kind||'media');
+      const safeSrc=esc(src);
+      const tag=kind==='video'
+        ? `<video class="msg-media-player msg-media-video" src="${safeSrc}" controls preload="metadata" playsinline title="${safeName}"></video>`
+        : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
+      return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span></div></div>`;
+    };
     // HTTP(S) URL
     if(/^https?:\/\//i.test(ref)){
       // Rewrite localhost/127.0.0.1 to the actual server base URL so remote
@@ -1159,30 +1451,65 @@ function renderMd(raw){
       // joins cleanly — this preserves any subpath mount (e.g. /hermes/).
       let src=ref;
       if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
-        const base=document.baseURI.replace(/\/$/,'');
+        const base=(document.baseURI||'').replace(/\/$/,'');
         src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
       }
-      // MEDIA: tokens are only emitted for tool-generated images (image_generate etc.).
-      // Render all https:// URLs as <img> — extension check would miss extensionless
-      // CDN paths like fal.media content-addressed URLs (closes #853).
-      if(_IMAGE_EXTS.test(src.split('?')[0]) || /^https?:\/\//i.test(src)){
+      // MEDIA: tokens are usually tool-generated images. Render all https://
+      // URLs as <img> so extensionless CDN paths still work (#853), while
+      // preserving explicit audio/video/SVG URLs with their proper handlers.
+      const urlPath=src.split('?')[0];
+      const mediaKind=mediaKindForName(urlPath);
+      // SVG URLs → render inline as image
+      if(_SVG_EXTS.test(urlPath)){
+        return `<img class="msg-media-svg" src="${esc(src)}" alt="${t('media_svg_label')}" loading="lazy">`;
+      }
+      if(mediaKind==='audio'||mediaKind==='video') return mediaPlayerHtml(mediaKind,src,urlPath.split('/').pop()||mediaKind);
+      // Render all https:// URLs as <img> — extensionless CDN paths like fal.media still work (#853)
+      if(_IMAGE_EXTS.test(urlPath) || /^https?:\/\//i.test(src)){
         return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy">`;
       }
       return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
     }
     // Local file path
     const apiUrl='api/media?path='+encodeURIComponent(ref);
-    if(_IMAGE_EXTS.test(ref)){
+    const localKind=mediaKindForName(ref);
+    if(localKind==='image'){
       return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy">`;
     }
-    // Non-image local file — show download link with filename
-    const fname=esc(ref.split('/').pop()||ref);
+    // SVG → inline image (no download, render directly)
+    if(_SVG_EXTS.test(ref)){
+      return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${t('media_svg_label')}" loading="lazy">`;
+    }
+    // Audio/video → inline player with speed controls; use &inline=1 for byte-range seeking
+    if(_AUDIO_EXTS.test(ref)||_VIDEO_EXTS.test(ref)){
+      const kind=_AUDIO_EXTS.test(ref)?'audio':'video';
+      return _mediaPlayerHtml(kind,apiUrl+'&inline=1',ref.split('/').pop()||ref);
+    }
+    // PDF files → render first page preview with lazy-load
+    if(_PDF_EXTS.test(ref)){
+      const fname=esc(ref.split('/').pop()||ref);
+      return `<div class="pdf-preview-load" data-path="${esc(ref)}"><span class="pdf-preview-spinner">⏳</span> ${t('pdf_loading')} ${fname}...</div>`;
+    }
+    // HTML files → render inline in sandboxed iframe with lazy-load
+    if(_HTML_EXTS.test(ref)){
+      return `<div class="html-preview-load" data-path="${esc(ref)}"><span class="html-preview-spinner">⏳</span> ${t('html_loading')}</div>`;
+    }
     // .patch/.diff files → render inline as colored diff instead of download
+    const fname=esc(ref.split('/').pop()||ref);
     if(/\.(patch|diff)$/i.test(ref)){
       return `<div class="diff-inline-load" data-path="${esc(ref)}">${t('diff_loading')} ${fname}...</div>`;
     }
+    // CSV files → lazy-load and render as table
+    if(_CSV_EXTS.test(ref)){
+      return `<div class="csv-inline-load" data-path="${esc(ref)}">${t('csv_loading')} ${fname}...</div>`;
+    }
+    // Excalidraw files → lazy-load inline embed
+    if(_EXCALIDRAW_EXTS.test(ref)){
+      return `<div class="excalidraw-inline-load" data-path="${esc(ref)}">${t('excalidraw_loading')} ${fname}...</div>`;
+    }
     return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
   });
+
   // ── End MEDIA restore ──────────────────────────────────────────────────────
   // Restore blockquote stash. Done last so the inner HTML (already produced
   // by the recursive renderMd in the pre-pass) is dropped into the final
@@ -1825,6 +2152,118 @@ function copyMsg(btn){
   }).catch(()=>showToast(t('copy_failed')));
 }
 
+// ── TTS: Text-to-Speech via Web Speech API (#499) ──
+// Strips markdown, code blocks, and MEDIA: paths for clean speech output.
+function _stripForTTS(text){
+  // Remove code blocks entirely (```)
+  text=text.replace(/```[\s\S]*?```/g,' ');
+  // Remove inline code
+  text=text.replace(/`[^`]+`/g,' ');
+  // Strip bold/italic
+  text=text.replace(/\*\*(.+?)\*\*/g,'$1');
+  text=text.replace(/\*(.+?)\*/g,'$1');
+  text=text.replace(/__(.+?)__/g,'$1');
+  text=text.replace(/_(.+?)_/g,'$1');
+  // Strip headings
+  text=text.replace(/^#{1,6}\s+/gm,'');
+  // Strip links, keep text
+  text=text.replace(/\[([^\]]+)\]\([^)]+\)/g,'$1');
+  // Replace MEDIA: paths with a simple label
+  text=text.replace(/MEDIA:[^\s]+/g,'a file');
+  // Strip HTML tags that may leak through markdown
+  text=text.replace(/<[^>]+>/g,' ');
+  // Collapse whitespace
+  text=text.replace(/\s+/g,' ').trim();
+  return text;
+}
+
+let _ttsSpeaking=false;
+let _ttsCurrentUtterance=null;
+
+function speakMessage(btn){
+  if(!('speechSynthesis' in window)){
+    showToast(t('tts_not_supported')||'Speech synthesis not supported in this browser.');
+    return;
+  }
+  // If already speaking this message, stop
+  if(btn&&btn.dataset.speaking==='1'){
+    stopTTS();
+    return;
+  }
+  // Stop any current speech
+  stopTTS();
+
+  const row=btn?btn.closest('[data-raw-text]'):null;
+  const text=row?row.dataset.rawText:'';
+  if(!text) return;
+
+  const clean=_stripForTTS(text);
+  if(!clean) return;
+
+  const utter=new SpeechSynthesisUtterance(clean);
+
+  // Apply saved voice preference
+  const savedVoice=localStorage.getItem('hermes-tts-voice');
+  const voices=speechSynthesis.getVoices();
+  if(savedVoice&&voices.length){
+    const match=voices.find(v=>v.name===savedVoice);
+    if(match) utter.voice=match;
+  }
+
+  // Apply saved rate/pitch
+  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
+  if(!isNaN(savedRate)) utter.rate= Math.min(2,Math.max(0.5,savedRate));
+  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
+  if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
+
+  _ttsCurrentUtterance=utter;
+  _ttsSpeaking=true;
+  if(btn) btn.dataset.speaking='1';
+
+  utter.onend=()=>{ _ttsSpeaking=false; _ttsCurrentUtterance=null; if(btn) btn.dataset.speaking='0'; };
+  utter.onerror=()=>{ _ttsSpeaking=false; _ttsCurrentUtterance=null; if(btn) btn.dataset.speaking='0'; };
+
+  speechSynthesis.speak(utter);
+}
+
+function stopTTS(){
+  if('speechSynthesis' in window){
+    speechSynthesis.cancel();
+  }
+  _ttsSpeaking=false;
+  _ttsCurrentUtterance=null;
+  // Reset all speaking buttons
+  document.querySelectorAll('[data-speaking="1"]').forEach(btn=>{ btn.dataset.speaking='0'; });
+}
+
+function autoReadLastAssistant(){
+  if(!('speechSynthesis' in window)) return;
+  const pref=localStorage.getItem('hermes-tts-auto-read');
+  if(pref!=='true') return;
+  // Find the last assistant message segment in the DOM
+  const rows=document.querySelectorAll('.msg-row[data-role="assistant"], .assistant-segment[data-raw-text]');
+  if(!rows.length) return;
+  const last=rows[rows.length-1];
+  const text=last.dataset.rawText||'';
+  if(!text.trim()) return;
+  const clean=_stripForTTS(text);
+  if(!clean) return;
+
+  const utter=new SpeechSynthesisUtterance(clean);
+  const savedVoice=localStorage.getItem('hermes-tts-voice');
+  const voices=speechSynthesis.getVoices();
+  if(savedVoice&&voices.length){
+    const match=voices.find(v=>v.name===savedVoice);
+    if(match) utter.voice=match;
+  }
+  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
+  if(!isNaN(savedRate)) utter.rate=Math.min(2,Math.max(0.5,savedRate));
+  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
+  if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
+
+  speechSynthesis.speak(utter);
+}
+
 // ── Reconnect banner (B4/B5: reload resilience) ──
 const INFLIGHT_KEY = 'hermes-webui-inflight'; // localStorage key for in-flight session tracking
 const INFLIGHT_STATE_KEY = 'hermes-webui-inflight-state'; // localStorage snapshots for mid-stream reload recovery
@@ -2000,6 +2439,7 @@ async function forceUpdate(btn){
 // blind setTimeout(reload, 2500) that race-lost against slow hardware or
 // reverse proxies that 502 immediately when the upstream socket closes (#874).
 async function _waitForServerThenReload(opts){
+  // Polls the /health endpoint; implementation uses a relative URL so subpath mounts keep working.
   opts=opts||{};
   const interval=opts.interval||500;
   const maxMs=opts.maxMs||15000;
@@ -2199,6 +2639,64 @@ function _assistantTurnBlocks(turn){
 function _thinkingCardHtml(text){
   const clean=_sanitizeThinkingDisplayText(text);
   return `<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+}
+function isSimplifiedToolCalling(){
+  return window._simplifiedToolCalling!==false;
+}
+function _thinkingActivityNode(text){
+  const row=document.createElement('div');
+  row.className='agent-activity-thinking';
+  row.innerHTML=_thinkingCardHtml(text);
+  return row;
+}
+// ── Activity-group user expand intent (#1298) ──────────────────────────────
+// When the user manually expands the live "Activity" dropdown during streaming,
+// preserve that intent across the destroy/recreate cycle that fires on every
+// thinking/tool event. Without this, ensureActivityGroup() re-creates the group
+// with the default collapsed state and finalizeThinkingCard() force-collapses
+// it whenever the assistant transitions from thinking → tool → thinking, so
+// the panel snaps shut every few seconds while the user is trying to read it.
+//
+// The tracker is a singleton boolean: there is at most one live activity group
+// at a time (selector .tool-call-group[data-live-tool-call-group="1"]). It is
+// set to true when the user clicks the summary to expand, false when they
+// click to collapse, and cleared back to undefined when the live group is
+// finalized into a settled assistant turn (the live attribute is removed in
+// _convertLiveActivityGroupToSettled / when liveAssistantTurn loses its id).
+let _liveActivityUserExpanded;
+function _onLiveActivityToggle(group){
+  if(!group) return;
+  // Only track explicit user clicks on the live group, not programmatic toggles.
+  if(group.getAttribute('data-live-tool-call-group')!=='1') return;
+  _liveActivityUserExpanded = !group.classList.contains('tool-call-group-collapsed');
+}
+function _clearLiveActivityUserIntent(){
+  _liveActivityUserExpanded = undefined;
+}
+function ensureActivityGroup(inner, opts){
+  opts=opts||{};
+  if(!inner) return null;
+  const live=!!opts.live;
+  const selector=live?'.tool-call-group[data-live-tool-call-group="1"]':'.tool-call-group[data-agent-activity-group="1"]';
+  let group=inner.querySelector(selector);
+  if(!group){
+    group=document.createElement('div');
+    let collapsed=opts.collapsed!==false;
+    // Restore the user's explicit expand intent when recreating the live
+    // activity group within the same turn (#1298).
+    if(live && _liveActivityUserExpanded === true) collapsed=false;
+    else if(live && _liveActivityUserExpanded === false) collapsed=true;
+    group.className='tool-call-group agent-activity-group'+(collapsed?' tool-call-group-collapsed':'');
+    group.setAttribute('data-tool-call-group','1');
+    group.setAttribute('data-agent-activity-group','1');
+    if(live) group.setAttribute('data-live-tool-call-group','1');
+    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="const g=this.closest('.tool-call-group');const c=g.classList.toggle('tool-call-group-collapsed');this.setAttribute('aria-expanded',String(!c));if(typeof _onLiveActivityToggle==='function')_onLiveActivityToggle(g);"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-list">tools / thinking</span><span class="tool-call-group-count">0</span></button><div class="tool-call-group-body"></div>`;
+    const anchor=opts.anchor||null;
+    if(anchor&&anchor.parentElement===inner) anchor.insertAdjacentElement('afterend', group);
+    else inner.appendChild(group);
+  }
+  _syncToolCallGroupSummary(group);
+  return group;
 }
 function _compressionStateForCurrentSession(){
   const state=window._compressionUi;
@@ -2464,6 +2962,10 @@ function renderCompressionUi(){
 // for the common read-only back-navigation case; not suitable as a general cache.
 const _sessionHtmlCache=new Map();
 let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
+function clearMessageRenderCache(){
+  _sessionHtmlCache.clear();
+  _sessionHtmlCacheSid=null;
+}
 
 function renderMessages(){
   const inner=$('msgInner');
@@ -2481,8 +2983,9 @@ function renderMessages(){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();renderMermaidBlocks();renderKatexBlocks();});
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
+      if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
     }
@@ -2554,6 +3057,7 @@ function renderMessages(){
   let _prevSepKey=null;
   let currentAssistantTurn=null;
   const assistantSegments=new Map();
+  const assistantThinking=new Map();
   const userRows=new Map();
   for(let vi=0;vi<visWithIdx.length;vi++){
     const {m,rawIdx}=visWithIdx[vi];
@@ -2603,24 +3107,23 @@ function renderMessages(){
     const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
+      // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
       const _attachSid=(S.session&&S.session.session_id)||'';
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
-        const fname=f.split('/').pop()||f;
-        if(_IMAGE_EXTS.test(fname)){
-          // Use api/file/raw which resolves filename relative to the session workspace.
-          // api/media expects a full absolute path which we don't store on the client side.
-          const imgUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
-          return `<img class="msg-media-img" src="${esc(imgUrl)}" alt="${esc(fname)}" loading="lazy">`;
-        }
-        return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
+        const fLabel=typeof f==='string'?f:(f&&(f.name||f.filename||f.path))||'';
+        const fname=String(fLabel).split('/').pop()||String(fLabel);
+        // Use api/file/raw which resolves filename relative to the session workspace.
+        const fileUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
+        return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
-    const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
+    const bodyHtml = isUser ? _renderUserFencedBlocks(content) : renderMd(_stripXmlToolCallsDisplay(String(content)));
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
+    const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
     // correctly via offset arithmetic; bare toLocaleString is the browser-tz fallback.
@@ -2628,7 +3131,7 @@ function renderMessages(){
     const tsTitle=tsVal?(_fmtSv?_fmtSv(new Date(tsVal*1000),{}):new Date(tsVal*1000).toLocaleString()):'';
     const tsTime=_formatMessageFooterTimestamp(tsVal);
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${copyBtn}${retryBtn}</span></div>`;
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${copyBtn}${retryBtn}</span></div>`;
 
     if(_isContextCompactionMessage(m)){
       if(compressionState || referenceNode){
@@ -2670,11 +3173,14 @@ function renderMessages(){
       seg.setAttribute('data-live-assistant','1');
     }
     if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
-    if(thinkingText&&window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
+    if(thinkingText&&window._showThinking!==false){
+      if(isSimplifiedToolCalling()) assistantThinking.set(rawIdx, thinkingText);
+      else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
+    }
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml);
     if(hasVisibleBody){
       seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
-    }else if(!thinkingText){
+    }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
       seg.classList.add('assistant-segment-anchor');
     }
     _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
@@ -2788,53 +3294,78 @@ function renderMessages(){
     });
     if(derived.length) S.toolCalls=derived;
   }
-  if(!S.busy && S.toolCalls && S.toolCalls.length){
-    inner.querySelectorAll('.tool-card-row:not([data-compression-card])').forEach(el=>el.remove());
+  if(!S.busy){
+    inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card])').forEach(el=>el.remove());
     const byAssistant = {};
-    for(const tc of S.toolCalls){
+    for(const tc of (S.toolCalls||[])){
       const key = tc.assistant_msg_idx !== undefined ? tc.assistant_msg_idx : -1;
       if(!byAssistant[key]) byAssistant[key] = [];
       byAssistant[key].push(tc);
     }
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     const anchorInsertAfter = new Map();
-    for(const [key, cards] of Object.entries(byAssistant)){
-      const aIdx = parseInt(key);
-      let anchorRow=assistantSegments.get(aIdx)||null;
-      if(!anchorRow&&assistantIdxs.length){
-        const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
-        anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+    if(isSimplifiedToolCalling()){
+      const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys()])].sort((a,b)=>a-b);
+      for(const aIdx of activityIdxs){
+        const cards=byAssistant[aIdx]||[];
+        let anchorRow=assistantSegments.get(aIdx)||null;
+        if(!anchorRow&&assistantIdxs.length){
+          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
+          anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+        }
+        if(!anchorRow) continue;
+        const anchorParent=anchorRow.parentElement;
+        const insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
+        const group=ensureActivityGroup(anchorParent,{collapsed:true,anchor:insertAfterNode});
+        const body=group&&group.querySelector('.tool-call-group-body');
+        if(!body) continue;
+        const thinkingText=assistantThinking.get(aIdx);
+        if(thinkingText) body.appendChild(_thinkingActivityNode(thinkingText));
+        for(const tc of cards){
+          body.appendChild(buildToolCard(tc));
+        }
+        _syncToolCallGroupSummary(group);
+        if(anchorRow) anchorInsertAfter.set(anchorRow, group);
       }
-      if(!anchorRow) continue;
-      const anchorParent=anchorRow.parentElement;
-      const frag=document.createDocumentFragment();
-      let lastInsertedNode=null;
-      for(const tc of cards){
-        const card=buildToolCard(tc);
-        frag.appendChild(card);
-        lastInsertedNode=card;
+    }else if(S.toolCalls && S.toolCalls.length){
+      for(const [key, cards] of Object.entries(byAssistant)){
+        const aIdx = parseInt(key);
+        let anchorRow=assistantSegments.get(aIdx)||null;
+        if(!anchorRow&&assistantIdxs.length){
+          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
+          anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+        }
+        if(!anchorRow) continue;
+        const anchorParent=anchorRow.parentElement;
+        const frag=document.createDocumentFragment();
+        let lastInsertedNode=null;
+        for(const tc of cards){
+          const card=buildToolCard(tc);
+          frag.appendChild(card);
+          lastInsertedNode=card;
+        }
+        // Add expand/collapse toggle for groups with 2+ cards
+        if(cards.length>=2){
+          const toggle=document.createElement('div');
+          toggle.className='tool-cards-toggle';
+          // Collect card elements before they get moved to DOM
+          const cardEls=Array.from(frag.querySelectorAll('.tool-card'));
+          const expandBtn=document.createElement('button');
+          expandBtn.textContent=t('expand_all');
+          expandBtn.onclick=()=>cardEls.forEach(c=>c.classList.add('open'));
+          const collapseBtn=document.createElement('button');
+          collapseBtn.textContent=t('collapse_all');
+          collapseBtn.onclick=()=>cardEls.forEach(c=>c.classList.remove('open'));
+          toggle.appendChild(expandBtn);
+          toggle.appendChild(collapseBtn);
+          frag.insertBefore(toggle,frag.firstChild);
+        }
+        const insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
+        const refNode = insertAfterNode ? insertAfterNode.nextSibling : null;
+        if(refNode) anchorParent.insertBefore(frag,refNode);
+        else anchorParent.appendChild(frag);
+        if(anchorRow&&lastInsertedNode) anchorInsertAfter.set(anchorRow, lastInsertedNode);
       }
-      // Add expand/collapse toggle for groups with 2+ cards
-      if(cards.length>=2){
-        const toggle=document.createElement('div');
-        toggle.className='tool-cards-toggle';
-        // Collect card elements before they get moved to DOM
-        const cardEls=Array.from(frag.querySelectorAll('.tool-card'));
-        const expandBtn=document.createElement('button');
-        expandBtn.textContent=t('expand_all');
-        expandBtn.onclick=()=>cardEls.forEach(c=>c.classList.add('open'));
-        const collapseBtn=document.createElement('button');
-        collapseBtn.textContent=t('collapse_all');
-        collapseBtn.onclick=()=>cardEls.forEach(c=>c.classList.remove('open'));
-        toggle.appendChild(expandBtn);
-        toggle.appendChild(collapseBtn);
-        frag.insertBefore(toggle,frag.firstChild);
-      }
-      const insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
-      const refNode = insertAfterNode ? insertAfterNode.nextSibling : null;
-      if(refNode) anchorParent.insertBefore(frag,refNode);
-      else anchorParent.appendChild(frag);
-      if(anchorRow&&lastInsertedNode) anchorInsertAfter.set(anchorRow, lastInsertedNode);
     }
   }
   // Render per-turn token usage on each assistant message that has it (#503).
@@ -2873,12 +3404,14 @@ function renderMessages(){
     scrollToBottom();
   }
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();renderMermaidBlocks();renderKatexBlocks();});
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
+  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
+  requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();}); 
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
   }
+  // Apply persisted playback speed after media nodes are rendered.
+  if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
   if(sid){
@@ -2891,6 +3424,12 @@ function renderMessages(){
   }
 }
 
+function _toolDisplayName(tc){
+  const name=(tc&&tc.name)||'tool';
+  if(name==='subagent_progress') return 'Subagent';
+  if(name==='delegate_task') return 'Delegate task';
+  return name;
+}
 function toolIcon(name){
   const icons={
     terminal:        li('terminal'),
@@ -2935,9 +3474,7 @@ function buildToolCard(tc){
   const isDelegation=tc.name==='delegate_task';
   const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
-  let displayName=tc.name;
-  if(isSubagent) displayName='Subagent';
-  if(isDelegation) displayName='Delegate task';
+  let displayName=_toolDisplayName(tc);
   let previewText=tc.preview||displaySnippet||'';
   if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
   row.innerHTML=`
@@ -2962,6 +3499,33 @@ function buildToolCard(tc){
   return row;
 }
 
+function _syncToolCallGroupSummary(group){
+  if(!group) return;
+  const cards=Array.from(group.querySelectorAll('.tool-card-row .tool-card'));
+  const toolCount=cards.length;
+  const thinkingCount=group.querySelectorAll('.agent-activity-thinking .thinking-card').length;
+  const names=cards.map(card=>{
+    const el=card.querySelector('.tool-card-name');
+    return el?String(el.textContent||'').trim():'';
+  }).filter(Boolean);
+  const uniqueNames=[...new Set(names)];
+  const label=group.querySelector('.tool-call-group-label');
+  const list=group.querySelector('.tool-call-group-list');
+  const badge=group.querySelector('.tool-call-group-count');
+  const parts=[];
+  if(thinkingCount) parts.push('thinking');
+  if(uniqueNames.length) parts.push(uniqueNames.slice(0,5).join(', ')+(uniqueNames.length>5?'…':''));
+  const total=toolCount+thinkingCount;
+  if(label){
+    if(thinkingCount&&toolCount) label.textContent=`Activity: thinking + ${toolCount} tool${toolCount===1?'':'s'}`;
+    else if(thinkingCount) label.textContent='Activity: thinking';
+    else if(toolCount) label.textContent=`Activity: ${toolCount} tool${toolCount===1?'':'s'}`;
+    else label.textContent='Activity';
+  }
+  if(list) list.textContent=parts.join(' · ')||'tools / thinking';
+  if(badge) badge.textContent=String(total);
+}
+
 // ── Live tool card helpers (called during SSE streaming) ──
 // Live cards are inserted INLINE inside #msgInner (tagged with data-live-tid)
 // so the streaming layout matches the settled layout produced by renderMessages
@@ -2975,52 +3539,79 @@ function appendLiveToolCard(tc){
   if(!S.session||!S.activeStreamId) return;
   let turn=$('liveAssistantTurn');
   if(!turn){
-    appendThinking();
-    turn=$('liveAssistantTurn');
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    $('msgInner').appendChild(turn);
   }
   const inner=_assistantTurnBlocks(turn);
   if(!inner) return;
   const tid=tc.tid||'';
+  if(!isSimplifiedToolCalling()){
+    // Update existing card in place (tool_complete after tool_start)
+    if(tid){
+      const existing=inner.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
+      if(existing){
+        const replacement=buildToolCard(tc);
+        replacement.dataset.liveTid=tid;
+        existing.replaceWith(replacement);
+        // Keep #toolRunningRow alive — dots stay until text starts streaming
+        // or the next tool fires (which replaces them). Removing here caused
+        // a gap between tool completion and the first text token arriving.
+        return;
+      }
+    }
+    const row=buildToolCard(tc);
+    if(tid) row.dataset.liveTid=tid;
+    // Insert after whichever comes last: the current live assistant segment or
+    // the last tool card. This handles both cases:
+    //   text → tool1 → tool2  (no text between tools: anchor is card1)
+    //   text1 → tool1 → text2 → tool2  (text between tools: anchor is text2)
+    const children=Array.from(inner.children);
+    // Include .thinking-card-row so tool cards land AFTER a finalized thinking
+    // card, not between the text segment and thinking.
+    const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-card-row,.thinking-card-row')).pop();
+    if(anchor) anchor.insertAdjacentElement('afterend', row);
+    else inner.appendChild(row);
+    // Add a 3-dot waiting indicator below the tool card so there's visual
+    // feedback while the tool is running. Removed when text starts streaming
+    // (ensureAssistantRow) or when tool_complete fires.
+    const oldWait=$('toolRunningRow');if(oldWait)oldWait.remove();
+    const waitRow=document.createElement('div');
+    waitRow.id='toolRunningRow';
+    waitRow.className='assistant-segment';
+    waitRow.innerHTML='<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
+    row.insertAdjacentElement('afterend', waitRow);
+    if(typeof scrollIfPinned==='function') scrollIfPinned();
+    return;
+  }
+  const children=Array.from(inner.children);
+  const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')).pop();
+  const group=ensureActivityGroup(inner,{live:true,collapsed:false,anchor});
+  const body=group.querySelector('.tool-call-group-body');
   // Update existing card in place (tool_complete after tool_start)
   if(tid){
-    const existing=inner.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
+    const existing=body.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
     if(existing){
       const replacement=buildToolCard(tc);
       replacement.dataset.liveTid=tid;
       existing.replaceWith(replacement);
-      // Keep #toolRunningRow alive — dots stay until text starts streaming
-      // or the next tool fires (which replaces them). Removing here caused
-      // a gap between tool completion and the first text token arriving.
+      _syncToolCallGroupSummary(group);
       return;
     }
   }
   const row=buildToolCard(tc);
   if(tid) row.dataset.liveTid=tid;
-  // Insert after whichever comes last: the current live assistant segment or
-  // the last tool card. This handles both cases:
-  //   text → tool1 → tool2  (no text between tools: anchor is card1)
-  //   text1 → tool1 → text2 → tool2  (text between tools: anchor is text2)
-  const children=Array.from(inner.children);
-  // Include .thinking-card-row so tool cards land AFTER a finalized thinking
-  // card, not between the text segment and thinking.
-  const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-card-row,.thinking-card-row')).pop();
-  if(anchor) anchor.insertAdjacentElement('afterend', row);
-  else inner.appendChild(row);
-  // Add a 3-dot waiting indicator below the tool card so there's visual
-  // feedback while the tool is running. Removed when text starts streaming
-  // (ensureAssistantRow) or when tool_complete fires.
-  const oldWait=$('toolRunningRow');if(oldWait)oldWait.remove();
-  const waitRow=document.createElement('div');
-  waitRow.id='toolRunningRow';
-  waitRow.className='assistant-segment';
-  waitRow.innerHTML='<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
-  row.insertAdjacentElement('afterend', waitRow);
+  body.appendChild(row);
+  _syncToolCallGroupSummary(group);
   if(typeof scrollIfPinned==='function') scrollIfPinned();
 }
 
 function clearLiveToolCards(){
   const inner=_assistantTurnBlocks($('liveAssistantTurn'));
-  if(inner) inner.querySelectorAll('.tool-card-row[data-live-tid]').forEach(el=>el.remove());
+  if(inner) inner.querySelectorAll('.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]').forEach(el=>el.remove());
+  // Reset the per-turn user expand intent so the next turn starts at the
+  // default collapsed state (#1298).
+  if(typeof _clearLiveActivityUserIntent==='function') _clearLiveActivityUserIntent();
   // Legacy #liveToolCards container cleanup — kept for safety in case any
   // leftover cards were inserted there before this refactor took effect.
   const container=$('liveToolCards');
@@ -3271,7 +3862,8 @@ function addCopyButtons(container){
   if(!el) return;
   el.querySelectorAll('pre > code').forEach(codeEl=>{
     const pre=codeEl.parentElement;
-    if(pre.querySelector('.code-copy-btn')) return;
+    const header=pre.previousElementSibling;
+    if(pre.querySelector('.code-copy-btn')||(header&&header.classList.contains('pre-header')&&header.querySelector('.code-copy-btn'))) return;
     const btn=document.createElement('button');
     btn.className='code-copy-btn';
     btn.textContent=t('copy');
@@ -3282,7 +3874,6 @@ function addCopyButtons(container){
         setTimeout(()=>{btn.textContent=t('copy');},1500);
       }).catch(()=>{btn.textContent=t('copy_failed');setTimeout(()=>{btn.textContent=t('copy');},1500);});
     };
-    const header=pre.previousElementSibling;
     if(header&&header.classList.contains('pre-header')){
       header.style.display='flex';
       header.style.justifyContent='space-between';
@@ -3326,6 +3917,266 @@ function loadDiffInline(){
   });
 }
 
+function loadCsvInline(){
+  const CSV_MAX_SIZE=256*1024; // 256 KB cap for inline CSV rendering
+  document.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    fetch('api/media?path='+encodeURIComponent(path))
+      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(text=>{
+        if(text.length>CSV_MAX_SIZE){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_too_large')}</span></div>`;
+          return;
+        }
+        const rows=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n').filter(r=>r.trim());
+        if(rows.length<2){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_no_data')}</span></div>`;
+          return;
+        }
+        // Auto-detect separator (comma, semicolon, tab)
+        // Heuristic: uses the first separator found in the header row. Edge case:
+        // quoted fields containing commas without non-quoted commas in the header
+        // could cause misdetection — acceptable trade-off for a preview renderer.
+        const firstLine=rows[0];
+        const separators=[',',';','\t'];
+        let sep=separators.find(s=>firstLine.includes(s))||',';
+        const headers=rows[0].split(sep).map(c=>c.trim().replace(/^["']|["']$/g,''));
+        const bodyRows=rows.slice(1).map(r=>'<tr>'+r.split(sep).map(c=>`<td>${esc(c.trim().replace(/^["']|["']$/g,''))}</td>`).join('')+'</tr>').join('');
+        const headerRow=headers.map(h=>`<th>${esc(h)}</th>`).join('');
+        el.outerHTML=`<div class="csv-table-wrap"><div class="pre-header">${esc(path.split('/').pop())} <span style="opacity:.5;font-size:11px">${t('csv_header_note')}</span></div><table class="csv-table"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
+      })
+      .catch(()=>{
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_error')}</span></div>`;
+      });
+  });
+}
+
+function loadExcalidrawInline(){
+  const EXCALIDRAW_MAX_SIZE=512*1024; // 512 KB cap
+  document.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    fetch('api/media?path='+encodeURIComponent(path))
+      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(text=>{
+        if(text.length>EXCALIDRAW_MAX_SIZE){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_too_large')}</span></div>`;
+          return;
+        }
+        // Validate it looks like Excalidraw JSON
+        let data;
+        try{data=JSON.parse(text);}catch(e){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_invalid')}</span></div>`;
+          return;
+        }
+        if(!data.type||data.type!=='excalidraw'){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_invalid')}</span></div>`;
+          return;
+        }
+        const fname=esc(path.split('/').pop());
+        const downloadUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        el.outerHTML=`<div class="excalidraw-embed-wrap" title="${t('excalidraw_simplified')}">
+  <div class="msg-artifact-header">
+    <span class="msg-media-label">${t('excalidraw_label')}</span>
+    <a class="excalidraw-open-link" href="${downloadUrl}" download="${fname}">${t('excalidraw_download')} ${fname}</a>
+  </div>
+  <div class="excalidraw-canvas" data-excalidraw='${esc(text)}'></div>
+</div>`;
+        // Lazy-init Excalidraw render after DOM insertion
+        requestAnimationFrame(()=>_renderExcalidrawCanvases());
+      })
+      .catch(()=>{
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_error')}</span></div>`;
+      });
+  });
+}
+
+let _excalidrawScriptLoaded=false;
+function _renderExcalidrawCanvases(){
+  document.querySelectorAll('.excalidraw-canvas:not([data-rendered])').forEach(el=>{
+    el.setAttribute('data-rendered','1');
+    const dataStr=el.getAttribute('data-excalidraw');
+    if(!dataStr) return;
+    // Render a simple SVG preview using the Excalidraw elements
+    try{
+      const data=JSON.parse(dataStr);
+      const elements=data.elements||[];
+      if(!elements.length){el.innerHTML=`<div class="excalidraw-empty">${t('excalidraw_empty')}</div>`;return;}
+      // Calculate bounds
+      let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+      elements.forEach(el=>{
+        const b=[el.x||0,el.y||0,(el.x||0)+(el.width||0),(el.y||0)+(el.height||0)];
+        minX=Math.min(minX,b[0]);minY=Math.min(minY,b[1]);
+        maxX=Math.max(maxX,b[2]);maxY=Math.max(maxY,b[3]);
+      });
+      const pad=20;minX-=pad;minY-=pad;maxX+=pad;maxY+=pad;
+      const w=Math.max(maxX-minX,200);const h=Math.max(maxY-minY,150);
+      // SVG attributes are rendered via innerHTML below, so attacker-controlled
+      // values from JSON (e.g. strokeColor='red"/><script>...') would break out
+      // of the attribute. Escape strings; coerce numerics.
+      const _sa=v=>String(v==null?'':v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const _num=(v,fb)=>{const n=Number(v);return Number.isFinite(n)?n:fb;};
+      const svgParts=[`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${_num(minX,0)} ${_num(minY,0)} ${_num(w,200)} ${_num(h,150)}" class="excalidraw-svg">`];
+      elements.forEach(el=>{
+        const stroke=_sa(el.strokeColor||'#1e1e1e');
+        const fill=_sa(el.backgroundColor||'transparent');
+        const sw=_num(el.strokeWidth,2);
+        const x=_num(el.x,0),y=_num(el.y,0),w=_num(el.width,0),h=_num(el.height,0);
+        if(el.type==='rectangle'){
+          svgParts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" stroke="${stroke}" stroke-width="${sw}" fill="${fill}" rx="${el.roundness?.type===3?8:0}"/>`);
+        }else if(el.type==='diamond'){
+          const cx=x+w/2,cy=y+h/2;
+          svgParts.push(`<polygon points="${cx},${y} ${x+w},${cy} ${cx},${y+h} ${x},${cy}" stroke="${stroke}" stroke-width="${sw}" fill="${fill}"/>`);
+        }else if(el.type==='ellipse'){
+          svgParts.push(`<ellipse cx="${x+w/2}" cy="${y+h/2}" rx="${w/2}" ry="${h/2}" stroke="${stroke}" stroke-width="${sw}" fill="${fill}"/>`);
+        }else if(el.type==='line'){
+          const pts=(el.points||[]).filter(p=>Array.isArray(p)&&p.length>=2);
+          if(!pts.length) return;
+          let d=`M ${_num(x+_num(pts[0][0],0),0)} ${_num(y+_num(pts[0][1],0),0)}`;
+          for(let i=1;i<pts.length;i++) d+=` L ${_num(x+_num(pts[i][0],0),0)} ${_num(y+_num(pts[i][1],0),0)}`;
+          svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`);
+        }else if(el.type==='arrow'){
+          const pts=(el.points||[]).filter(p=>Array.isArray(p)&&p.length>=2);
+          if(!pts.length) return;
+          let d=`M ${_num(x+_num(pts[0][0],0),0)} ${_num(y+_num(pts[0][1],0),0)}`;
+          for(let i=1;i<pts.length;i++) d+=` L ${_num(x+_num(pts[i][0],0),0)} ${_num(y+_num(pts[i][1],0),0)}`;
+          svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)"/>`);
+        }else if(el.type==='text'){
+          const fontSize=_num(el.fontSize,20);
+          const txt=String(el.text==null?'':el.text);
+          const lines=txt.split('\n');
+          lines.forEach((line,i)=>{
+            svgParts.push(`<text x="${x}" y="${y+i*fontSize*1.2+fontSize}" fill="${stroke}" font-size="${fontSize}" font-family="Virgil, Segoe UI Emoji, sans-serif">${esc(line)}</text>`);
+          });
+        }else if(el.type==='draw'){
+          const pts=(el.points||[]).filter(p=>Array.isArray(p)&&p.length>=2);
+          if(pts.length>1){
+            let d=`M ${_num(x+_num(pts[0][0],0),0)} ${_num(y+_num(pts[0][1],0),0)}`;
+            for(let i=1;i<pts.length;i++) d+=` L ${_num(x+_num(pts[i][0],0),0)} ${_num(y+_num(pts[i][1],0),0)}`;
+            svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`);
+          }
+        }
+        // Unknown element types (e.g. image, frame, group, freedraw) are
+        // silently skipped to avoid breaking the render. This is a simplified
+        // SVG preview, not a pixel-identical Excalidraw canvas reproduction.
+      });
+      // Arrow marker definition
+      svgParts.unshift(`<defs><marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#1e1e1e"/></marker></defs>`);
+      svgParts.push('</svg>');
+      el.innerHTML=svgParts.join('');
+    }catch(e){
+      el.innerHTML=`<div class="excalidraw-empty">${t('excalidraw_render_error')}</div>`;
+    }
+  });
+}
+
+// ── PDF inline preview (first page) ────────────────────────────────────────
+// NOTE: PDF.js is loaded from CDN (jsdelivr). Offline/air-gapped deployments
+// will not get inline previews; the 15 s fallback timeout degrades to a
+// download link in that case. The 4 MB size cap is checked client-side after
+// the full buffer is received — ideally the server would enforce it before
+// streaming (out of scope for this client-side PR).
+let _pdfjsReady=false, _pdfjsLoading=false;
+function loadPdfInline(){
+  const PDF_MAX_SIZE=4*1024*1024; // 4 MB cap for inline PDF preview
+  document.querySelectorAll('.pdf-preview-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    const fname=path.split('/').pop()||path;
+    const loadPdf=(pdfjsLib)=>{
+      fetch('api/media?path='+encodeURIComponent(path))
+        .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
+        .then(buf=>{
+          if(buf.byteLength>PDF_MAX_SIZE){
+            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="api/media?path=${encodeURIComponent(path)}&download=1" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
+            return;
+          }
+          return pdfjsLib.getDocument({data:buf}).promise;
+        })
+        .then(pdf=>{
+          if(!pdf) return;
+          pdf.getPage(1).then(page=>{
+            const canvas=document.createElement('canvas');
+            const scale=1.5;
+            const viewport=page.getViewport({scale});
+            canvas.width=viewport.width;
+            canvas.height=viewport.height;
+            canvas.className='pdf-preview-canvas';
+            page.render({canvasContext:canvas.getContext('2d'),viewport}).promise.then(()=>{
+              // Canvas bitmap is runtime state, not part of HTML serialization.
+              // Attach the canvas as a DOM node — interpolating its serialized
+              // form into a template string parses back as an empty canvas.
+              const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+              const wrap=document.createElement('div');
+              wrap.className='pdf-preview-wrap';
+              wrap.innerHTML=`<div class="pdf-preview-header"><span>📄 ${esc(fname)}</span><a href="${dlUrl}" download="${esc(fname)}" class="pdf-download-link">${t('pdf_download')} ↓</a></div><div class="pdf-preview-body"></div>`;
+              wrap.querySelector('.pdf-preview-body').appendChild(canvas);
+              el.replaceWith(wrap);
+            });
+          });
+        })
+        .catch(()=>{
+          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
+        });
+    };
+    if(_pdfjsReady){
+      loadPdf(window._pdfjsLib);
+    } else if(!_pdfjsLoading){
+      _pdfjsLoading=true;
+      const s=document.createElement('script');
+      s.src='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
+      s.type='module';
+      s.textContent=`
+        import * as pdfjsLib from '${s.src}';
+        pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
+        window._pdfjsLib=pdfjsLib;
+        window._pdfjsReady=true;
+        window.dispatchEvent(new Event('pdfjs-ready'));
+      `;
+      document.head.appendChild(s);
+      window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
+      setTimeout(()=>{
+        if(!_pdfjsReady){
+          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          if(el.parentNode){
+            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
+          }
+        }
+      },15000);
+    } else {
+      window.addEventListener('pdfjs-ready',()=>{ loadPdf(window._pdfjsLib); },{once:true});
+    }
+  });
+}
+
+// ── HTML inline preview (sandboxed iframe) ─────────────────────────────────
+function loadHtmlInline(){
+  const HTML_MAX_SIZE=256*1024; // 256 KB cap for inline HTML preview
+  document.querySelectorAll('.html-preview-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    const fname=path.split('/').pop()||path;
+    fetch('api/media?path='+encodeURIComponent(path))
+      .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
+      .then(html=>{
+        if(html.length>HTML_MAX_SIZE){
+          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
+          return;
+        }
+        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${dlUrl}" download="${esc(fname)}" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
+      })
+      .catch(()=>{
+        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
+      });
+  });
+}
+
 function renderMermaidBlocks(){
   const blocks=document.querySelectorAll('.mermaid-block:not([data-rendered])');
   if(!blocks.length) return;
@@ -3357,10 +4208,17 @@ function renderMermaidBlocks(){
     const id=block.dataset.mermaidId||('m-'+Math.random().toString(36).slice(2));
     try{
       const {svg}=await mermaid.render(id,code);
+      const tmp=document.getElementById('d'+id);
+      if(tmp) tmp.remove();
       block.innerHTML=svg;
       block.classList.add('mermaid-rendered');
     }catch(e){
-      // Fall back to showing as a code block
+      const tmp=document.getElementById('d'+id);
+      if(tmp) tmp.remove();
+      // Fall back to showing as a code block. Remove the mermaid marker so a
+      // later render pass cannot retry this already-failed block.
+      block.classList.remove('mermaid-block');
+      block.classList.add('prewrap');
       block.innerHTML=`<div class="pre-header">mermaid</div><pre><code>${esc(code)}</code></pre>`;
     }
   });
@@ -3409,30 +4267,50 @@ function renderKatexBlocks(){
 
 function _thinkingMarkup(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
+  const openClass=isSimplifiedToolCalling()?'':' open';
   return (clean&&String(clean).trim())
-    ? `<div class="thinking-card open"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
+    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function finalizeThinkingCard(){
-  const row=$('thinkingRow');
-  if(!row) return;
-  // If the row is still just a spinner (no thinking content rendered),
-  // remove it entirely — it's the initial waiting dots.
-  const hasContent=row.querySelector('.thinking-card') || row.classList.contains('thinking-card-row');
-  if(!hasContent && row.getAttribute('data-thinking-active')==='1'){
-    row.remove();
+  if(!isSimplifiedToolCalling()){
+    const row=$('thinkingRow');
+    if(!row) return;
+    // If the row is still just a spinner (no thinking content rendered),
+    // remove it entirely — it's the initial waiting dots.
+    const hasContent=row.querySelector('.thinking-card') || row.classList.contains('thinking-card-row');
+    if(!hasContent && row.getAttribute('data-thinking-active')==='1'){
+      row.remove();
+      return;
+    }
+    // If the user was watching (scroll pinned = at bottom), scroll the thinking
+    // card back to the top so the completed response is visible underneath without
+    // the thinking content blocking it. If they scrolled up to read history,
+    // leave their scroll position intact.
+    if(_scrollPinned){
+      const body=row&&row.querySelector('.thinking-card-body');
+      if(body) body.scrollTop=0;
+    }
+    row.removeAttribute('id');
+    row.removeAttribute('data-thinking-active');
     return;
   }
-  // If the user was watching (scroll pinned = at bottom), scroll the thinking
-  // card back to the top so the completed response is visible underneath without
-  // the thinking content blocking it. If they scrolled up to read history,
-  // leave their scroll position intact.
-  if(_scrollPinned){
-    const body=row&&row.querySelector('.thinking-card-body');
-    if(body) body.scrollTop=0;
+  const turn=$('liveAssistantTurn');
+  const group=turn&&turn.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
+  if(group){
+    // Respect the user's explicit expand intent (#1298) — only force-collapse
+    // when the user has not manually expanded this turn's activity group, or
+    // has manually collapsed it. Otherwise the panel snaps shut whenever new
+    // activity arrives, even mid-read.
+    if(_liveActivityUserExpanded !== true){
+      group.classList.add('tool-call-group-collapsed');
+      const summary=group.querySelector('.tool-call-group-summary');
+      if(summary) summary.setAttribute('aria-expanded','false');
+    }
+    const active=group.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
+    if(active) active.removeAttribute('data-thinking-active');
+    _syncToolCallGroupSummary(group);
   }
-  row.removeAttribute('id');
-  row.removeAttribute('data-thinking-active');
 }
 function appendThinking(text=''){
   // Guard: ignore if session was switched during an async SSE stream.
@@ -3447,40 +4325,81 @@ function appendThinking(text=''){
     $('msgInner').appendChild(turn);
   }
   const blocks=_assistantTurnBlocks(turn);
-  let row=$('thinkingRow');
+  if(!blocks) return;
+  if(!isSimplifiedToolCalling()){
+    let row=$('thinkingRow');
+    if(!row){
+      row=document.createElement('div');
+      row.className='assistant-segment';
+      row.id='thinkingRow';
+      row.setAttribute('data-thinking-active','1');
+      // Insert after whichever comes last: a live assistant segment or a tool card.
+      // This mirrors appendLiveToolCard's anchor logic so thinking always appears
+      // in the right position in the interleaved sequence.
+      // Also skip #toolRunningRow (dots) — thinking should go before dots, not after.
+      const allChildren=Array.from(blocks.children);
+      const anchor=allChildren.filter(el=>
+        el.id!=='toolRunningRow' &&
+        el.matches('[data-live-assistant="1"],.tool-card-row')
+      ).pop();
+      if(anchor) anchor.insertAdjacentElement('afterend', row);
+      else blocks.appendChild(row);
+    }
+    row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
+    row.innerHTML=_thinkingMarkup(text);
+    scrollIfPinned();
+    // Auto-scroll the thinking card body to bottom if the user is watching
+    // (scroll pinned). If the user scrolled up to read history, leave it alone.
+    if(_scrollPinned){
+      const body=row&&row.querySelector('.thinking-card-body');
+      if(body) body.scrollTop=body.scrollHeight;
+    }
+    return;
+  }
+  if(!String(text||'').trim()){
+    scrollIfPinned();
+    return;
+  }
+  const allChildren=Array.from(blocks.children);
+  const anchor=allChildren.filter(el=>
+    el.id!=='toolRunningRow' &&
+    el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')
+  ).pop();
+  const group=ensureActivityGroup(blocks,{live:true,collapsed:true,anchor});
+  const body=group&&group.querySelector('.tool-call-group-body');
+  if(!body) return;
+  let row=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
   if(!row){
     row=document.createElement('div');
-    row.className='assistant-segment';
-    row.id='thinkingRow';
+    row.className='agent-activity-thinking';
     row.setAttribute('data-thinking-active','1');
-    // Insert after whichever comes last: a live assistant segment or a tool card.
-    // This mirrors appendLiveToolCard's anchor logic so thinking always appears
-    // in the right position in the interleaved sequence.
-    // Also skip #toolRunningRow (dots) — thinking should go before dots, not after.
-    const allChildren=Array.from(blocks.children);
-    const anchor=allChildren.filter(el=>
-      el.id!=='toolRunningRow' &&
-      el.matches('[data-live-assistant="1"],.tool-card-row')
-    ).pop();
-    if(anchor) anchor.insertAdjacentElement('afterend', row);
-    else blocks.appendChild(row);
+    body.insertBefore(row, body.firstChild);
   }
-  row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
   row.innerHTML=_thinkingMarkup(text);
+  _syncToolCallGroupSummary(group);
   scrollIfPinned();
-  // Auto-scroll the thinking card body to bottom if the user is watching
-  // (scroll pinned). If the user scrolled up to read history, leave it alone.
   if(_scrollPinned){
-    const body=row&&row.querySelector('.thinking-card-body');
-    if(body) body.scrollTop=body.scrollHeight;
+    const thinkingBody=row&&row.querySelector('.thinking-card-body');
+    if(thinkingBody) thinkingBody.scrollTop=thinkingBody.scrollHeight;
   }
 }
 function updateThinking(text=''){appendThinking(text);}
 function removeThinking(){
-  const el=$('thinkingRow');
-  if(el) el.remove();
+  if(!isSimplifiedToolCalling()){
+    const el=$('thinkingRow');
+    if(el) el.remove();
+    const turn=$('liveAssistantTurn');
+    const blocks=_assistantTurnBlocks(turn);
+    if(turn&&blocks&&!blocks.children.length) turn.remove();
+    return;
+  }
   const turn=$('liveAssistantTurn');
   const blocks=_assistantTurnBlocks(turn);
+  if(blocks) blocks.querySelectorAll('.agent-activity-thinking').forEach(el=>el.remove());
+  if(blocks) blocks.querySelectorAll('.tool-call-group[data-agent-activity-group="1"]').forEach(group=>{
+    _syncToolCallGroupSummary(group);
+    if(!group.querySelector('.tool-card-row,.agent-activity-thinking')) group.remove();
+  });
   if(turn&&blocks&&!blocks.children.length) turn.remove();
 }
 
@@ -3846,19 +4765,27 @@ async function promptNewFolder(){
   }catch(e){setStatus(t('folder_create_failed')+e.message);}
 }
 
-function renderTray(){
+function renderTray(){ // non-media files use paperclip chip
   const tray=$('attachTray');tray.innerHTML='';
   if(!S.pendingFiles.length){tray.classList.remove('has-files');updateSendBtn();return;}
   tray.classList.add('has-files');
   updateSendBtn();
   S.pendingFiles.forEach((f,i)=>{
     const chip=document.createElement('div');chip.className='attach-chip';
-    // Image files get a thumbnail preview; other files keep the paperclip chip
-    if(_IMAGE_EXTS.test(f.name)){
+    const mediaKind=_mediaKindForName(f.name);
+    if(_IMAGE_EXTS.test(f.name)||mediaKind==='audio'||mediaKind==='video'){
       const blobUrl=URL.createObjectURL(f);
-      chip.className='attach-chip attach-chip--image';
+      chip.className='attach-chip attach-chip--media attach-chip--'+mediaKind; // attach-chip--audio attach-chip--video
       chip.dataset.blobUrl=blobUrl;
-      chip.innerHTML=`<img class="attach-thumb" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
+      if(mediaKind==='image'){
+        chip.innerHTML=`<img class="attach-thumb" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
+      } else if(_SVG_EXTS.test(f.name)){
+        chip.innerHTML=`<img class="attach-thumb attach-thumb--svg" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
+      } else if(mediaKind==='audio'){
+        chip.innerHTML=`<span class="attach-chip-media">🎵 ${esc(f.name)}</span><audio controls preload="metadata" src="${esc(blobUrl)}"></audio><button title="${t('remove_title')}">${li('x',12)}</button>`;
+      } else if(mediaKind==='video'){
+        chip.innerHTML=`<span class="attach-chip-media">🎬 ${esc(f.name)}</span><video controls preload="metadata" src="${esc(blobUrl)}"></video><button title="${t('remove_title')}">${li('x',12)}</button>`;
+      }
     } else {
       chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
     }
@@ -3892,7 +4819,7 @@ async function uploadPendingFiles(){
         names.push({name: data.dest, path: data.dest, extracted: data.extracted});
         if(typeof loadDir==='function')loadDir(S.currentDir||'.');
       }else{
-        names.push({name: data.filename, path: data.path});
+        names.push({name: data.filename, path: data.path, mime: data.mime, size: data.size, is_image: !!data.is_image});
       }
     }catch(e){failures++;setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);}
     bar.style.width=`${Math.round((i+1)/total*100)}%`;
