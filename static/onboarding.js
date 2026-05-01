@@ -1,4 +1,4 @@
-const ONBOARDING={status:null,step:0,steps:['system','setup','workspace','password','finish'],form:{provider:'openrouter',workspace:'',model:'',password:'',apiKey:'',baseUrl:''},active:false};
+const ONBOARDING={status:null,step:0,steps:['system','setup','search','workspace','password','finish'],form:{provider:'openrouter',workspace:'',model:'',password:'',apiKey:'',baseUrl:'',braveApiKey:''},active:false};
 
 function _getOnboardingSetupProviders(){
   return (((ONBOARDING.status||{}).setup||{}).providers)||[];
@@ -40,6 +40,7 @@ function _onboardingStepMeta(key){
   return ({
     system:{title:t('onboarding_step_system_title'),desc:t('onboarding_step_system_desc')},
     setup:{title:t('onboarding_step_setup_title'),desc:t('onboarding_step_setup_desc')},
+    search:{title:t('onboarding_step_search_title'),desc:t('onboarding_step_search_desc')},
     workspace:{title:t('onboarding_step_workspace_title'),desc:t('onboarding_step_workspace_desc')},
     password:{title:t('onboarding_step_password_title'),desc:t('onboarding_step_password_desc')},
     finish:{title:t('onboarding_step_finish_title'),desc:t('onboarding_step_finish_desc')}
@@ -206,6 +207,29 @@ function _renderOnboardingBody(){
     return;
   }
 
+  if(key==='search'){
+    const searchStatus=(ONBOARDING.status||{}).search||{};
+    const alreadyConfigured=!!searchStatus.brave_configured;
+    const maskedKey=searchStatus.brave_key_masked||'';
+    _setOnboardingNotice('','');
+    body.innerHTML=`
+      <div class="onboarding-copy">
+        <p><strong>${t('onboarding_search_headline')||'Give your AI the ability to search the web'}</strong></p>
+        <p>${t('onboarding_search_free_tier')||'Free: 2,000 searches/month &middot; No credit card needed'}</p>
+        ${alreadyConfigured?`<p class="onboarding-check ok"><strong>${t('onboarding_search_saved')||'Web search enabled \u2713'}</strong> <span>${esc(maskedKey)}</span></p>`:''}
+      </div>
+      <label class="onboarding-field">
+        <span>${t('onboarding_search_key_label')||'Brave Search API key'}</span>
+        <input id="onboardingBraveKeyInput" type="password" value="${esc(ONBOARDING.form.braveApiKey||'')}" placeholder="BSA..." oninput="ONBOARDING.form.braveApiKey=this.value">
+      </label>
+      <p class="onboarding-copy"><a href="https://brave.com/search/api/" target="_blank" rel="noopener">${t('onboarding_search_get_key')||'Get a free key \u2192'}</a></p>
+      <div class="onboarding-actions-row" style="margin-top:12px;display:flex;gap:8px">
+        <button class="btn-primary" onclick="submitOnboardingSearch()">${t('onboarding_search_save')||'Save &amp; continue'}</button>
+        <button class="btn-secondary" onclick="skipOnboardingSearch()">${t('onboarding_search_skip')||'Skip for now'}</button>
+      </div>`;
+    return;
+  }
+
   if(key==='workspace'){
     const workspaceOptions=_getOnboardingWorkspaceChoices().map(ws=>`<option value="${esc(ws.path)}">${esc(ws.name||ws.path)} — ${esc(ws.path)}</option>`).join('');
     _setOnboardingNotice(t('onboarding_notice_workspace'), 'info');
@@ -283,6 +307,8 @@ async function loadOnboardingWizard(){
   try{
     const status=await api('/api/onboarding/status');
     ONBOARDING.status=status;
+    // Load search status (Brave Search MCP)
+    try{const search=await api('/api/onboarding/search');ONBOARDING.status.search=search;}catch(_){}
     const current=((status.setup||{}).current)||{};
     ONBOARDING.form.provider=current.provider||'openrouter';
     ONBOARDING.form.workspace=(status.workspaces&&status.workspaces.last)||status.settings.default_workspace||'';
@@ -366,6 +392,28 @@ async function _finishOnboarding(){
     await newSession(true);
     await renderSessionList();
   }
+}
+
+async function submitOnboardingSearch(){
+  try{
+    const key=(ONBOARDING.form.braveApiKey||'').trim();
+    const result=await api('/api/onboarding/search',{method:'POST',body:JSON.stringify({brave_api_key:key})});
+    if(result.ok){
+      // Refresh search status in ONBOARDING.status
+      try{const s=await api('/api/onboarding/search');if(ONBOARDING.status)ONBOARDING.status.search=s;}catch(_){}
+      ONBOARDING.step++;
+      _renderOnboardingSteps();
+      _renderOnboardingBody();
+    }
+  }catch(e){
+    _setOnboardingNotice(e.message||String(e),'warn');
+  }
+}
+
+async function skipOnboardingSearch(){
+  ONBOARDING.step++;
+  _renderOnboardingSteps();
+  _renderOnboardingBody();
 }
 
 async function skipOnboarding(){

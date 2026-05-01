@@ -512,6 +512,8 @@ from api.onboarding import (
     apply_onboarding_setup,
     get_onboarding_status,
     complete_onboarding,
+    get_onboarding_search,
+    apply_onboarding_search,
 )
 
 # Approval system (optional -- graceful fallback if agent not available)
@@ -926,6 +928,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/onboarding/status":
         return j(handler, get_onboarding_status())
+
+    if parsed.path == "/api/onboarding/search":
+        return j(handler, get_onboarding_search())
 
     if parsed.path.startswith("/static/"):
         return _serve_static(handler, parsed)
@@ -1954,6 +1959,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/onboarding/complete":
         return j(handler, complete_onboarding())
+
+    if parsed.path == "/api/onboarding/search":
+        return j(handler, apply_onboarding_search(body))
 
     # ── Session pin (POST) ──
     if parsed.path == "/api/session/pin":

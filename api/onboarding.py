@@ -692,4 +692,99 @@ def apply_onboarding_setup(body: dict) -> dict:
 
 def complete_onboarding() -> dict:
     save_settings({"onboarding_completed": True})
-    return get_onboarding_status()
+
+
+# ── Brave Search onboarding (Task 12) ────────────────────────────────────────
+
+_BRAVE_SEARCH_CATALOG = {
+    "brave": {
+        "label": "Brave Search",
+        "env_var": "BRAVE_API_KEY",
+        "free_tier": "2,000 queries/month — no credit card required",
+        "signup_url": "https://brave.com/search/api/",
+        "description": "Gives your AI the ability to search the web for current information.",
+    }
+}
+
+
+def _get_brave_env_path() -> Path:
+    """Return the FITB hermes.env path — read at request time."""
+    default = "/data/config/hermes.env"
+    return Path(os.environ.get("HERMES_ENV_PATH", default))
+
+
+def _get_brave_config_path() -> Path:
+    """Return the FITB hermes.yaml path — read at request time."""
+    default = "/data/config/hermes.yaml"
+    return Path(os.environ.get("HERMES_CONFIG_PATH", default))
+
+
+def _read_brave_key_from_env() -> str:
+    """Return the current BRAVE_API_KEY value from the hermes.env file, or ''."""
+    env_path = _get_brave_env_path()
+    values = _load_env_file(env_path)
+    return values.get("BRAVE_API_KEY", "")
+
+
+def _mask_key(key: str) -> str:
+    """Return first 6 chars + *** for display."""
+    if not key:
+        return ""
+    return key[:6] + "***"
+
+
+def _write_brave_key_to_env(env_path: Path, key: str) -> None:
+    """Append or update BRAVE_API_KEY in the env file."""
+    existing: dict[str, str] = {}
+    if env_path.exists():
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            existing[k.strip()] = v.strip()
+    existing["BRAVE_API_KEY"] = key
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"{k}={v}" for k, v in existing.items()]
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _patch_brave_key_in_yaml(config_path: Path, key: str) -> None:
+    """Replace ${BRAVE_API_KEY} placeholder in hermes.yaml with the real key."""
+    if not config_path.exists():
+        return
+    try:
+        content = config_path.read_text(encoding="utf-8")
+        patched = content.replace("${BRAVE_API_KEY}", key)
+        patched = patched.replace("'${BRAVE_API_KEY}'", key)
+        patched = patched.replace('"${BRAVE_API_KEY}"', key)
+        if patched != content:
+            config_path.write_text(patched, encoding="utf-8")
+    except Exception:
+        logger.debug("Failed to patch BRAVE_API_KEY in hermes.yaml", exc_info=True)
+
+
+def get_onboarding_search() -> dict:
+    """GET /api/onboarding/search — return current Brave Search config state."""
+    current_key = _read_brave_key_from_env()
+    return {
+        "catalog": _BRAVE_SEARCH_CATALOG,
+        "brave_configured": bool(current_key),
+        "brave_key_masked": _mask_key(current_key),
+    }
+
+
+def apply_onboarding_search(body: dict) -> dict:
+    """POST /api/onboarding/search — save Brave API key (or skip if empty)."""
+    key = str(body.get("brave_api_key") or "").strip()
+
+    if not key:
+        return {"ok": True, "skipped": True}
+
+    env_path = _get_brave_env_path()
+    config_path = _get_brave_config_path()
+
+    _write_brave_key_to_env(env_path, key)
+    _patch_brave_key_in_yaml(config_path, key)
+
+    return {"ok": True, "skipped": False}
