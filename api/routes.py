@@ -708,6 +708,8 @@ from api.onboarding import (
     get_onboarding_status,
     complete_onboarding,
     probe_provider_endpoint,
+    get_onboarding_search,
+    apply_onboarding_search,
 )
 
 # Approval system (optional -- graceful fallback if agent not available)
@@ -1265,6 +1267,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/onboarding/status":
         return j(handler, get_onboarding_status())
+
+    if parsed.path == "/api/onboarding/search":
+        return j(handler, get_onboarding_search())
 
     if parsed.path.startswith("/extensions/"):
         from api.extensions import serve_extension_static
@@ -2607,6 +2612,9 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, probe_provider_endpoint(provider, base_url, api_key))
         except Exception as e:
             return bad(handler, f"probe failed: {e}", 500)
+
+    if parsed.path == "/api/onboarding/search":
+        return j(handler, apply_onboarding_search(body))
 
     # ── Session pin (POST) ──
     if parsed.path == "/api/session/pin":
