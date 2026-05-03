@@ -196,7 +196,9 @@ class TestIndexHtmlIntegration:
         # Versioned shell assets must include the cache version query.
         for asset in (
             "style.css",
+            "fox-in-the-box.css",
             "boot.js",
+            "fox-in-the-box.js",
             "ui.js",
             "messages.js",
             "sessions.js",
