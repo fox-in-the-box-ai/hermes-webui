@@ -199,9 +199,19 @@ def _get_config_path() -> Path:
 
 
 def get_config() -> dict:
-    """Return the cached config dict, loading from disk if needed."""
+    """Return the cached config dict, loading from disk if needed or if file changed."""
     if not _cfg_cache:
         reload_config()
+        return _cfg_cache
+
+    try:
+        if _get_config_path().stat().st_mtime != _cfg_mtime:
+            with _cfg_lock:
+                if _get_config_path().stat().st_mtime != _cfg_mtime:
+                    reload_config()
+    except OSError:
+        pass  # File disappeared or permission error; keep using cache
+
     return _cfg_cache
 
 
