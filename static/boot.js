@@ -1217,7 +1217,13 @@ function applyBotName(){
   const topbarTitle=$('topbarTitle');
   if(topbarTitle && (!S.session)) topbarTitle.textContent=name;
   const msg=$('msg');
-  if(msg) msg.placeholder='Message '+name+'\u2026';
+  if(msg){
+    if(typeof document!=='undefined'&&document.documentElement&&document.documentElement.classList.contains('fox-in-the-box')){
+      msg.placeholder='Message Fox\u2026';
+    }else{
+      msg.placeholder='Message '+name+'\u2026';
+    }
+  }
 }
 
 (async()=>{
@@ -1236,6 +1242,9 @@ function applyBotName(){
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._botName=s.bot_name||'Hermes';
+    if(typeof document!=='undefined'&&document.documentElement&&document.documentElement.classList.contains('fox-in-the-box')){
+      window._botName='Fox in the box';
+    }
     if(s.default_model) window._defaultModel=s.default_model;
     // Persist default workspace so the blank new-chat page can show it
     // and workspace actions (New file/folder) work before the first session (#804).
@@ -1269,6 +1278,9 @@ function applyBotName(){
     window._sidebarDensity='compact';
     window._busyInputMode='queue';
     window._botName='Hermes';
+    if(typeof document!=='undefined'&&document.documentElement&&document.documentElement.classList.contains('fox-in-the-box')){
+      window._botName='Fox in the box';
+    }
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'

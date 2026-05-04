@@ -13,6 +13,10 @@ let _profileMode = 'empty'; // 'empty' | 'read' | 'create'
 let _profilePreFormDetail = null;
 let _pendingSettingsTargetPanel = null; // destination selected while settings had unsaved changes
 
+function _isFoxInTheBoxProduct(){
+  return typeof document!=='undefined'&&document.documentElement&&document.documentElement.classList.contains('fox-in-the-box');
+}
+
 // Map of panel names → i18n keys for the app titlebar label.
 const APP_TITLEBAR_KEYS = {
   chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
@@ -2891,7 +2895,7 @@ function _preferencesPayloadFromUi(){
   const busyInputModeSel=$('settingsBusyInputMode');
   if(busyInputModeSel) payload.busy_input_mode=busyInputModeSel.value;
   const botNameField=$('settingsBotName');
-  if(botNameField) payload.bot_name=botNameField.value;
+  if(botNameField&&!_isFoxInTheBoxProduct()) payload.bot_name=botNameField.value;
   return payload;
 }
 
@@ -3150,7 +3154,7 @@ async function loadSettingsPanel(){
     }
     // Bot name — debounced autosave (text input)
     const botNameField=$('settingsBotName');
-    if(botNameField){
+    if(botNameField&&!_isFoxInTheBoxProduct()){
       botNameField.value=settings.bot_name||'Hermes';
       let botNameTimer=null;
       botNameField.addEventListener('input',()=>{
@@ -3431,7 +3435,11 @@ function _applySavedSettingsUi(saved, body, opts){
   window._simplifiedToolCalling=body.simplified_tool_calling!==false;
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._busyInputMode=body.busy_input_mode||'queue';
-  window._botName=body.bot_name||'Hermes';
+  if(_isFoxInTheBoxProduct()){
+    window._botName='Fox in the box';
+  }else{
+    window._botName=body.bot_name||'Hermes';
+  }
   if(typeof applyBotName==='function') applyBotName();
   if(typeof setLocale==='function') setLocale(language);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
@@ -3533,8 +3541,10 @@ async function saveSettings(andClose){
   body.sidebar_density=sidebarDensity;
   body.busy_input_mode=busyInputMode;
   body.auto_title_refresh_every=(($('settingsAutoTitleRefresh')||{}).value||'0');
-  const botName=(($('settingsBotName')||{}).value||'').trim();
-  body.bot_name=botName||'Hermes';
+  if(!_isFoxInTheBoxProduct()){
+    const botName=(($('settingsBotName')||{}).value||'').trim();
+    body.bot_name=botName||'Hermes';
+  }
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     try{

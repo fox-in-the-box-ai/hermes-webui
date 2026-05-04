@@ -757,3 +757,8 @@ pre[class*=language-] {
     transition-duration: 0.01ms;
   }
 }
+
+/* Preferences: assistant rename is fixed for Fox in the Box (see boot.js / panels.js). */
+.fox-in-the-box .fitb-settings-bot-name {
+  display: none !important;
+}
