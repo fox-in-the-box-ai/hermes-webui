@@ -229,6 +229,11 @@ body {
   font-weight: 500;
 }
 
+/* Top bar hidden — title is redundant when sidebar is visible */
+.app-titlebar {
+  display: none;
+}
+
 /* Chrome: slightly denser title + nav (Manrope ~ landing nav) */
 .app-titlebar-title {
   font-family: var(--font-body);
@@ -252,11 +257,11 @@ body {
 }
 .session-item {
   padding: calc(7px * var(--fitb-app-scale)) calc(7px * var(--fitb-app-scale));
-  font-size: calc(13px * var(--fitb-app-scale));
+  font-size: calc(14px * var(--fitb-app-scale));
   border-radius: var(--radius-md);
 }
 .session-meta {
-  font-size: calc(11px * var(--fitb-app-scale));
+  font-size: calc(12px * var(--fitb-app-scale));
 }
 .new-chat-btn {
   padding: calc(8px * var(--fitb-app-scale)) calc(11px * var(--fitb-app-scale));
@@ -268,7 +273,7 @@ body {
 .sidebar-search input {
   padding: calc(6px * var(--fitb-app-scale)) calc(9px * var(--fitb-app-scale))
     calc(6px * var(--fitb-app-scale)) calc(28px * var(--fitb-app-scale));
-  font-size: calc(13px * var(--fitb-app-scale));
+  font-size: calc(14px * var(--fitb-app-scale));
   border-radius: var(--radius-md);
 }
 .composer-wrap {
