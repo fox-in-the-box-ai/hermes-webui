@@ -915,7 +915,6 @@ async function loadInsights(animate) {
 
 function _renderInsights(d, box) {
   const fmtNum = n => n.toLocaleString();
-  const fmtCost = c => c > 0 ? '$' + c.toFixed(4) : t('insights_no_cost');
   const fmtTokens = n => n >= 1e6 ? (n/1e6).toFixed(1) + 'M' : n >= 1e3 ? (n/1e3).toFixed(1) + 'K' : fmtNum(n);
 
   // Overview cards
@@ -923,7 +922,6 @@ function _renderInsights(d, box) {
     { label: t('insights_sessions'), value: fmtNum(d.total_sessions), icon: li('message-square', 18) },
     { label: t('insights_messages'), value: fmtNum(d.total_messages), icon: li('hash', 18) },
     { label: t('insights_tokens'), value: fmtTokens(d.total_tokens), icon: li('cpu', 18) },
-    { label: t('insights_cost'), value: fmtCost(d.total_cost), icon: li('dollar-sign', 18) },
   ];
 
   // Models table
