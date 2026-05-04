@@ -234,6 +234,17 @@ body {
   display: none;
 }
 
+/* Mobile: show titlebar for safe-area spacing, but hide inner content and border */
+@media (max-width: 767px) {
+  .app-titlebar {
+    display: flex;
+    border-bottom: none;
+  }
+  .app-titlebar-inner {
+    display: none;
+  }
+}
+
 /* Chrome: slightly denser title + nav (Manrope ~ landing nav) */
 .app-titlebar-title {
   font-family: var(--font-body);
