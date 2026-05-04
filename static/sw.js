@@ -8,6 +8,8 @@
 // Cache version is injected by the server at request time (routes.py /sw.js handler).
 // Bumps automatically whenever the git commit changes — no manual edits needed.
 const CACHE_NAME = 'hermes-shell-__CACHE_VERSION__';
+// Default !0 = skip precache & fetch interception. Server sets !1 when HERMES_WEBUI_PWA_SHELL_CACHE=1.
+const SHELL_CACHE_DISABLED = !0;
 
 // Static assets that form the app shell.
 //
@@ -44,6 +46,10 @@ const SHELL_ASSETS = [
 
 // Install: pre-cache the app shell
 self.addEventListener('install', (event) => {
+  if (SHELL_CACHE_DISABLED) {
+    self.skipWaiting();
+    return;
+  }
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
       return cache.addAll(SHELL_ASSETS).catch((err) => {
@@ -57,6 +63,14 @@ self.addEventListener('install', (event) => {
 
 // Activate: clean up old caches
 self.addEventListener('activate', (event) => {
+  if (SHELL_CACHE_DISABLED) {
+    event.waitUntil(
+      caches.keys().then((keys) =>
+        Promise.all(keys.map((k) => caches.delete(k)))
+      ).then(() => self.clients.claim())
+    );
+    return;
+  }
   event.waitUntil(
     caches.keys().then((keys) =>
       Promise.all(
@@ -72,6 +86,8 @@ self.addEventListener('activate', (event) => {
 // - Shell assets → cache-first with network fallback
 // - Everything else → network-first, fall back to offline page
 self.addEventListener('fetch', (event) => {
+  if (SHELL_CACHE_DISABLED) return;
+
   const url = new URL(event.request.url);
 
   // Never intercept cross-origin requests

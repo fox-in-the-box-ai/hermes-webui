@@ -24,6 +24,17 @@ from api.agent_sessions import MESSAGING_SOURCES
 
 logger = logging.getLogger(__name__)
 
+
+def _hermes_webui_pwa_shell_cache_requested() -> bool:
+    """Opt-in: precache the app shell in the service worker (faster repeat visits, may serve stale assets).
+
+    Default is off — each load uses the network with normal Cache-Control headers.
+    Set HERMES_WEBUI_PWA_SHELL_CACHE=1 (or true/yes) to restore cache-first shell behavior.
+    """
+    v = os.environ.get("HERMES_WEBUI_PWA_SHELL_CACHE", "").strip().lower()
+    return v in ("1", "true", "yes")
+
+
 # Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
 # connections often end this way when a browser tab sleeps, a phone switches
 # networks, or Tailscale leaves the socket half-closed.  If these bubble to the
@@ -1506,6 +1517,11 @@ def handle_get(handler, parsed) -> bool:
         from api.extensions import inject_extension_tags
 
         html = _INDEX_HTML_PATH.read_text(encoding="utf-8").replace("__WEBUI_VERSION__", version_token)
+        if _hermes_webui_pwa_shell_cache_requested():
+            html = html.replace(
+                "window.__HERMES_DISABLE_SW_CACHE__=!0",
+                "window.__HERMES_DISABLE_SW_CACHE__=!1",
+            )
         return t(
             handler,
             inject_extension_tags(html),
@@ -1571,6 +1587,12 @@ def handle_get(handler, parsed) -> bool:
             text = sw_path.read_text(encoding="utf-8").replace(
                 "__WEBUI_VERSION__", version_token
             )
+            if _hermes_webui_pwa_shell_cache_requested():
+                text = text.replace(
+                    "const SHELL_CACHE_DISABLED = !0;",
+                    "const SHELL_CACHE_DISABLED = !1;",
+                    1,
+                )
             data = text.encode("utf-8")
             handler.send_response(200)
             handler.send_header("Content-Type", "application/javascript; charset=utf-8")

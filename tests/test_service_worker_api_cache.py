@@ -35,3 +35,10 @@ def test_service_worker_does_not_intercept_its_own_script():
     assert "url.pathname.endsWith('/sw.js')" in SW_SRC, (
         "service worker must bypass /sw.js so a stale cached worker cannot block cache-version updates"
     )
+
+
+def test_service_worker_has_shell_cache_kill_switch():
+    assert "SHELL_CACHE_DISABLED" in SW_SRC, (
+        "sw.js must define SHELL_CACHE_DISABLED so routes.py can enable precache "
+        "when HERMES_WEBUI_PWA_SHELL_CACHE is set"
+    )
