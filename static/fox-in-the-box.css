@@ -671,3 +671,173 @@ button.send-btn:focus-visible {
     transition-duration: 0.01ms;
   }
 }
+
+/* ── Onboarding wizard — FITB brand overrides ───────────────────────────── */
+
+/* Sidebar: avatar at top */
+.onboarding-sidebar-avatar {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+  margin-bottom: 14px;
+  border: 2px solid var(--color-border);
+  box-shadow: var(--shadow-default);
+}
+
+/* Step number circle: outline on active step */
+.onboarding-step.active .onboarding-step-index {
+  background: transparent;
+  border: 2px solid var(--accent);
+  color: var(--accent-text);
+}
+:root.dark .onboarding-step.active .onboarding-step-index {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Provider chip grid */
+.onboarding-provider-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+.onboarding-provider-chip {
+  padding: 7px 14px;
+  border-radius: var(--radius-button, 5px);
+  border: 1px solid var(--color-border, var(--border));
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-body, var(--font-ui));
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.onboarding-provider-chip:hover {
+  background: var(--color-wash-hover, var(--hover-bg));
+  border-color: var(--accent);
+}
+.onboarding-provider-chip.active {
+  background: var(--color-primary-fill, var(--accent-bg-strong));
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 700;
+}
+
+/* More providers collapsible */
+.onboarding-more-providers {
+  margin-top: 8px;
+}
+.onboarding-more-providers summary {
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 0;
+}
+.onboarding-more-providers summary:hover {
+  color: var(--text);
+}
+.onboarding-more-providers[open] summary {
+  margin-bottom: 8px;
+}
+.onboarding-provider-grid--other {
+  margin-top: 0;
+}
+
+/* Provider detail section */
+.onboarding-provider-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 4px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border, var(--border));
+}
+
+/* Key guidance steps */
+.onboarding-key-guide {
+  background: var(--color-wash-subtle, var(--accent-bg));
+  border: 1px solid var(--color-border, var(--border));
+  border-radius: var(--radius-image, 10px);
+  padding: 14px 16px;
+}
+.onboarding-key-guide-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+.onboarding-key-guide-steps {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.onboarding-key-guide-steps li {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.5;
+}
+.onboarding-key-guide-steps a {
+  color: var(--accent-text, var(--accent));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.onboarding-key-guide-steps code {
+  font-size: 12px;
+  background: var(--code-inline-bg);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+/* Done step */
+.onboarding-done-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+  padding: 24px 0;
+}
+.onboarding-done-avatar img {
+  width: 88px;
+  height: 88px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid var(--color-border, var(--border));
+  box-shadow: var(--shadow-default);
+}
+.onboarding-done-headline {
+  font-family: var(--font-heading, var(--font-ui));
+  font-size: 22px;
+  font-weight: 400;
+  letter-spacing: -0.03em;
+  color: var(--text);
+  line-height: 1.2;
+}
+.onboarding-done-body {
+  font-size: 14px;
+  color: var(--muted);
+  line-height: 1.7;
+  max-width: 340px;
+}
+
+/* Badge style tweak */
+.onboarding-badge {
+  letter-spacing: 0.1em;
+  font-size: 10px;
+}
+
+/* Sidebar title: use Sora heading */
+.onboarding-sidebar h2 {
+  font-family: var(--font-heading, var(--font-ui));
+  font-weight: 320;
+  letter-spacing: -0.03em;
+}
