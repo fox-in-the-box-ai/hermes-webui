@@ -34,7 +34,7 @@ const SHELL_ASSETS = [
   './static/i18n.js' + VQ,
   './static/workspace.js' + VQ,
   './static/terminal.js' + VQ,
-  './static/onboarding.js' + VQ,
+  './static/onboarding-preview.js' + VQ,
   './static/favicon.svg',
   './static/favicon-32.png',
   './static/fonts/Sora[wght].woff2',

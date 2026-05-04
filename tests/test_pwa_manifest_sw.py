@@ -208,7 +208,7 @@ class TestIndexHtmlIntegration:
             "i18n.js",
             "workspace.js",
             "terminal.js",
-            "onboarding.js",
+            "onboarding-preview.js",
         ):
             # Either inline `?v=__CACHE_VERSION__` or via the VQ constant
             # produces a URL string the cache lookup can match.

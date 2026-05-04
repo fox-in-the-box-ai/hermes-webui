@@ -57,7 +57,6 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers (~71 lines)
       models.py            Session model + CRUD, per-session profile tracking (~137 lines)
       profiles.py          Profile state management, hermes_cli wrapper (~246 lines)
-      onboarding.py        First-run onboarding status, real provider config writes, and readiness detection.
       routes.py            All GET + POST route handlers (~1180 lines)
       startup.py           Startup helpers: auto_install_agent_deps() (~50 lines)
       streaming.py         SSE engine, run_agent, cancel, HERMES_HOME save/restore (~236 lines)
@@ -72,7 +71,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       messages.js          send(), SSE event handlers, approval, transcript (~297 lines)
       panels.js            Cron, skills, memory, workspace, profiles, todo, settings (~974 lines)
       commands.js          Slash command registry, parser, autocomplete dropdown (~156 lines)
-      onboarding.js        First-run wizard overlay, provider setup flow, and settings/workspace orchestration.
+      onboarding-preview.js  URL-triggered wizard shell preview (?onboarding=1); full backend onboarding removed in FITB.
       boot.js              Event wiring, mobile sidebar/workspace nav, voice input, boot IIFE (~338 lines)
     tests/
       conftest.py          Isolated test server (port 8788, separate HERMES_HOME) (~240 lines)
