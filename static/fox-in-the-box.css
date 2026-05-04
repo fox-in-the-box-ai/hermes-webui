@@ -47,8 +47,6 @@
   --layout-grid-columns: 12;
   --radius-image: calc(10px * var(--fitb-app-scale));
   --radius-button: calc(5px * var(--fitb-app-scale));
-  --shadow-default: calc(5px * var(--fitb-app-scale)) calc(5px * var(--fitb-app-scale))
-    calc(10px * var(--fitb-app-scale)) 0 rgb(184 160 137 / 60%);
 
   /* Map Hermes semantic tokens → Fox palette (default / light) */
   --bg: var(--color-bg);
@@ -509,6 +507,10 @@ button.send-btn:focus-visible {
       rgb(255 255 255 / 0%)
     ),
     color-mix(in srgb, var(--user-bubble-bg) 72%, transparent);
+}
+
+pre[class*=language-] {
+  margin: 0 auto 1.5em auto;
 }
 
 /* Skins: Hermes alternate accents (unchanged palette when user opts in) */
