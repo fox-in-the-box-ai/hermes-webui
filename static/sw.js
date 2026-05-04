@@ -39,6 +39,7 @@ const SHELL_ASSETS = [
   './static/onboarding-preview.js' + VQ,
   './static/favicon.svg',
   './static/favicon-32.png',
+  './static/fox_avatar_cropped.jpg',
   './static/fonts/Sora[wght].woff2',
   './static/fonts/Manrope[wght].woff2',
   './manifest.json',
