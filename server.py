@@ -167,29 +167,6 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            # ── Onboarding redirect (checked at request time) ──────────────────
-            if not onboarding_complete() and not any(
-                parsed.path.startswith(p) for p in _SETUP_EXEMPT_PREFIXES
-            ):
-                self.send_response(302)
-                self.send_header("Location", "/setup")
-                self.end_headers()
-                return
-            # ── Setup routes ───────────────────────────────────────────────────
-            # Read POST body only for handlers that consume it here. Normal API
-            # routes must leave rfile untouched so handle_post -> read_body works.
-            if parsed.path == "/api/setup/openrouter":
-                content_length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(content_length) if content_length else b""
-                return handle_post_openrouter(self, body)
-            if parsed.path == "/api/setup/tailscale/start":
-                return handle_post_tailscale_start(self)
-            if parsed.path == "/api/setup/complete":
-                content_length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(content_length) if content_length else b""
-                return handle_post_complete(self, body)
-            if parsed.path == "/api/setup/restart":
-                return handle_post_restart(self)
             # ── Auth + normal routing ──────────────────────────────────────────
             if not check_auth(self, parsed): return
             result = handle_post(self, parsed)
