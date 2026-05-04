@@ -1,0 +1,18 @@
+name: Notify Monorepo on Push
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger submodule sync in fox-in-the-box
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: token ${{ secrets.MONOREPO_DISPATCH_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            https://api.github.com/repos/fox-in-the-box-ai/fox-in-the-box/dispatches \
+            --data '{"event_type": "hermes-webui-updated"}'
