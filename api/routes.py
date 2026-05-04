@@ -1637,6 +1637,12 @@ def handle_get(handler, parsed) -> bool:
             },
         )
 
+    # ── Onboarding setup (GET) ──
+    if parsed.path == "/setup":
+        from api.onboarding import handle_setup_page
+        handle_setup_page(handler)
+        return True
+
     if parsed.path == "/api/models":
         return j(handler, get_available_models())
 
@@ -2294,6 +2300,22 @@ def handle_post(handler, parsed) -> bool:
         return handle_transcribe(handler)
 
     body = read_body(handler)
+
+    # ── Onboarding setup (POST) ──
+    if parsed.path == "/api/setup/openrouter":
+        from api.onboarding import handle_setup_openrouter
+        result = handle_setup_openrouter(handler, body)
+        return j(handler, result, status=200 if result.get("ok") else 400)
+
+    if parsed.path == "/api/setup/complete":
+        from api.onboarding import handle_setup_complete
+        result = handle_setup_complete(handler, body)
+        return j(handler, result)
+
+    if parsed.path == "/api/setup/restart":
+        from api.onboarding import handle_setup_restart
+        result = handle_setup_restart(handler)
+        return j(handler, result, status=200 if result.get("ok") else 500)
 
     if parsed.path == "/api/session/new":
         try:
