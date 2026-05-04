@@ -556,11 +556,12 @@ const LOCALES = {
     save_skill: 'Save skill',
     editing: 'Editing',
     // Empty state
-    empty_title: 'What can I help with?',
-    empty_subtitle: 'Ask anything, run commands, explore files, or manage your scheduled tasks.',
-    suggest_files: 'What files are in this workspace?',
+    empty_title: 'Think less. Start here.',
+    empty_subtitle:
+      'Ask the way you would a teammate: research, terminal work, files, schedules. The Fox runs it in the box — private, on your machine.',
+    suggest_files: "What's in this workspace?",
     suggest_schedule: "What's on my schedule today?",
-    suggest_plan: 'Help me plan a small project.',
+    suggest_plan: 'Help me plan a small project step by step.',
     // onboarding
     onboarding_badge: 'GET STARTED',
     onboarding_title: 'Your machine, your Fox',
@@ -1453,11 +1454,12 @@ const LOCALES = {
     save_skill: 'スキルを保存',
     editing: '編集中',
     // Empty state
-    empty_title: '何をお手伝いしましょう?',
-    empty_subtitle: '何でも質問する、コマンド実行、ファイル探索、スケジュールタスク管理ができます。',
-    suggest_files: 'このワークスペースにあるファイルは?',
-    suggest_schedule: '今日のスケジュールは?',
-    suggest_plan: '小さなプロジェクトの計画を手伝って。',
+    empty_title: '考えることは減らして、ここから',
+    empty_subtitle:
+      '同僚に話すように — 調査、ターミナル、ファイル、予定。Fox がこの箱の中で動かします。データはあなたのマシンに。',
+    suggest_files: 'このワークスペースには何がある？',
+    suggest_schedule: '今日の予定は？',
+    suggest_plan: '小さなプロジェクトを、手順まで一緒に組み立てて',
     // onboarding
     onboarding_badge: 'はじめる',
     onboarding_title: 'あなたのマシン、あなたの Fox',

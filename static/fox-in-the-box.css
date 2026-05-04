@@ -265,7 +265,7 @@ button[data-panel="profiles"] {
 }
 
 #profileChipWrap,
-#composerWorkspaceGroup {
+#composerWorkspaceChip {
   display: none;
 }
 
@@ -348,6 +348,13 @@ button[data-panel="profiles"] {
 .composer-box {
   border-radius: var(--radius-lg);
   max-width: var(--layout-max);
+}
+.composer-workspace-files-btn {
+  padding: 8px;
+  border: none;
+}
+.composer-workspace-group {
+  border: none;
 }
 textarea#msg {
   font-size: calc(15px * var(--fitb-app-scale));
@@ -480,7 +487,14 @@ button.send-btn:focus-visible {
   --user-selection-bg: rgb(255 255 255 / 18%);
   --user-selection-text: var(--text);
 }
-
+.suggestion {
+  display: flex;
+  gap: 10px;
+  font-family: var(--font-ui);
+  font-weight: 500;
+  font-size: 14px;
+  align-items: center;
+}
 .msg-row {
   padding: calc(11px * var(--fitb-app-scale)) 0;
 }
