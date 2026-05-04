@@ -3367,6 +3367,8 @@ async function _saveProviderKey(providerId){
       showToast(res.provider+' key '+res.action);
       els.input.value='';
       await loadProvidersPanel(); // refresh list
+      // Refresh chat-input model dropdown so newly-configured provider's models appear immediately (#37)
+      if(typeof populateModelDropdown==='function') await populateModelDropdown();
     }else{
       showToast(res.error||'Failed to save key');
       els.saveBtn.disabled=false;
@@ -3388,6 +3390,8 @@ async function _removeProviderKey(providerId){
     if(res.ok){
       showToast(res.provider+' key '+t('providers_key_removed').toLowerCase());
       await loadProvidersPanel(); // refresh list
+      // Refresh chat-input model dropdown so removed provider's models disappear immediately (#37)
+      if(typeof populateModelDropdown==='function') await populateModelDropdown();
     }else{
       showToast(res.error||'Failed to remove key');
       if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}
