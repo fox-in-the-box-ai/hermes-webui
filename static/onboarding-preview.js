@@ -1,13 +1,15 @@
 /**
  * Client-only replay of the first-run onboarding wizard for UI/CSS/i18n work.
  * Trigger: ?onboarding=1|true|yes|preview or ?preview_onboarding=1|true|yes
- * Uses the same DOM structure and copy paths as the historical onboarding.js.
- * Skip / final step closes the overlay and strips those query params.
+ * Simplified 3-step flow (system → provider → optional password); no workspace/model UI.
+ * Skip / final action closes the overlay and strips those query params.
  */
 (function () {
   'use strict';
 
-  const PREVIEW_STEPS = ['system', 'setup', 'workspace', 'password', 'finish'];
+  /** OpenRouter default used across the guided preview (matches product default). */
+  const PREVIEW_DEFAULT_MODEL = 'moonshotai/kimi-k2.6';
+  const PREVIEW_STEPS = ['system', 'setup', 'password'];
 
   function _truthy(v) {
     const s = String(v || '').trim().toLowerCase();
@@ -44,17 +46,17 @@
         config_path: '~/.hermes/config.yaml',
         env_path: '~/.hermes/.env',
         current_provider: 'openrouter',
-        current_model: 'anthropic/claude-sonnet-4.5',
+        current_model: PREVIEW_DEFAULT_MODEL,
         provider_note: '',
         missing_modules: [],
       },
       settings: {
         password_enabled: false,
         default_workspace: '/home/you/workspace',
-        default_model: 'anthropic/claude-sonnet-4.5',
+        default_model: PREVIEW_DEFAULT_MODEL,
       },
       setup: {
-        current: { provider: 'openrouter', model: 'anthropic/claude-sonnet-4.5', base_url: '' },
+        current: { provider: 'openrouter', model: PREVIEW_DEFAULT_MODEL, base_url: '' },
         current_is_oauth: false,
         unsupported_note: '',
         providers: [
@@ -65,9 +67,9 @@
             env_var: 'OPENROUTER_API_KEY',
             key_optional: false,
             requires_base_url: false,
-            default_model: 'anthropic/claude-sonnet-4.5',
+            default_model: PREVIEW_DEFAULT_MODEL,
             models: [
-              { id: 'anthropic/claude-sonnet-4.5', label: 'anthropic/claude-sonnet-4.5' },
+              { id: PREVIEW_DEFAULT_MODEL, label: PREVIEW_DEFAULT_MODEL },
               { id: 'openai/gpt-5', label: 'openai/gpt-5' },
             ],
           },
@@ -117,7 +119,7 @@
     form: {
       provider: 'openrouter',
       workspace: '',
-      model: '',
+      model: PREVIEW_DEFAULT_MODEL,
       password: '',
       apiKey: '',
       baseUrl: '',
@@ -148,9 +150,7 @@
     return ({
       system: { title: t('onboarding_step_system_title'), desc: t('onboarding_step_system_desc') },
       setup: { title: t('onboarding_step_setup_title'), desc: t('onboarding_step_setup_desc') },
-      workspace: { title: t('onboarding_step_workspace_title'), desc: t('onboarding_step_workspace_desc') },
       password: { title: t('onboarding_step_password_title'), desc: t('onboarding_step_password_desc') },
-      finish: { title: t('onboarding_step_finish_title'), desc: t('onboarding_step_finish_desc') },
     })[key];
   }
 
@@ -186,26 +186,6 @@
     el.style.display = 'block';
     el.className = 'onboarding-status ' + kind;
     el.textContent = msg;
-  }
-
-  function _getOnboardingWorkspaceChoices() {
-    const items = ((ONBOARDING.status || {}).workspaces || {}).items || [];
-    return items.length ? items : [{ name: 'Home', path: ONBOARDING.form.workspace || '' }];
-  }
-
-  function _getOnboardingProviderModelChoices() {
-    const provider = _getOnboardingSetupProvider(ONBOARDING.form.provider);
-    if (
-      provider &&
-      provider.requires_base_url &&
-      ONBOARDING.probe &&
-      ONBOARDING.probe.status === 'ok' &&
-      Array.isArray(ONBOARDING.probe.models) &&
-      ONBOARDING.probe.models.length
-    ) {
-      return ONBOARDING.probe.models;
-    }
-    return provider ? provider.models || [] : [];
   }
 
   function _onboardingProbePreviewMessage(probe) {
@@ -270,37 +250,13 @@
     );
   }
 
-  function _getOnboardingSelectedModel() {
-    return ONBOARDING.form.model || '';
-  }
-
-  function _renderOnboardingModelField() {
-    const choices = _getOnboardingProviderModelChoices();
-    if (ONBOARDING.form.provider === 'custom') {
-      return (
-        '<label class="onboarding-field"><span>' +
-        esc(t('onboarding_model_label')) +
-        '</span><input id="onboardingModelInput" value="' +
-        esc(_getOnboardingSelectedModel()) +
-        '" placeholder="' +
-        esc(t('onboarding_custom_model_placeholder')) +
-        '" oninput="ONBOARDING.form.model=this.value"></label><p class="onboarding-copy">' +
-        esc(t('onboarding_custom_model_help')) +
-        '</p>'
-      );
-    }
-    const options = choices
-      .map((m) => '<option value="' + esc(m.id) + '">' + esc(m.label) + '</option>')
-      .join('');
-    return (
-      '<label class="onboarding-field"><span>' +
-      esc(t('onboarding_model_label')) +
-      '</span><select id="onboardingModelSelect" onchange="ONBOARDING.form.model=this.value">' +
-      options +
-      '</select></label><p class="onboarding-copy">' +
-      esc(t('onboarding_workspace_help')) +
-      '</p>'
-    );
+  function _renderOnboardingFixedModelNote() {
+    const msg = t('onboarding_fixed_model_note');
+    const text =
+      msg && msg !== 'onboarding_fixed_model_note'
+        ? msg
+        : 'New chats use moonshotai/kimi-k2.6 by default. You can change the model anytime in Settings.';
+    return '<p class="onboarding-copy onboarding-fixed-model-note">' + esc(text) + '</p>';
   }
 
   function _providerStatusLabel(system) {
@@ -358,13 +314,6 @@
       .join('');
   }
 
-  function _getOnboardingPasswordSummaryKey(settings) {
-    const hasExistingPassword = !!(settings && settings.password_enabled);
-    const hasNewPassword = !!((ONBOARDING.form.password || '').trim());
-    if (hasNewPassword) return hasExistingPassword ? 'onboarding_password_will_replace' : 'onboarding_password_will_enable';
-    return hasExistingPassword ? 'onboarding_password_keep_existing' : 'onboarding_password_remains_disabled';
-  }
-
   function _renderOnboardingBody() {
     const body = $('onboardingBody');
     if (!body || !ONBOARDING.status) return;
@@ -374,8 +323,9 @@
     const setup = ONBOARDING.status.setup || {};
     const nextBtn = $('onboardingNextBtn');
     const backBtn = $('onboardingBackBtn');
+    const isLast = key === 'password';
     if (backBtn) backBtn.style.display = ONBOARDING.step > 0 ? '' : 'none';
-    if (nextBtn) nextBtn.textContent = key === 'finish' ? t('onboarding_open') : t('onboarding_continue');
+    if (nextBtn) nextBtn.textContent = isLast ? t('onboarding_open') : t('onboarding_continue');
 
     if (key === 'system') {
       const hermesOk = system.hermes_found && system.imports_ok;
@@ -470,7 +420,8 @@
             _renderOnboardingBaseUrlField(showBaseUrl) +
             '<p class="onboarding-copy">' +
             keyHelp +
-            '</p>';
+            '</p>' +
+            _renderOnboardingFixedModelNote();
         } else {
           _setOnboardingNotice(t('onboarding_notice_setup_required'), 'warn');
           body.innerHTML =
@@ -492,7 +443,8 @@
             _renderOnboardingBaseUrlField(showBaseUrl) +
             '<p class="onboarding-copy">' +
             keyHelp +
-            '</p>';
+            '</p>' +
+            _renderOnboardingFixedModelNote();
         }
         return;
       }
@@ -512,6 +464,7 @@
         '<p class="onboarding-copy">' +
         keyHelp +
         '</p>' +
+        _renderOnboardingFixedModelNote() +
         '<div class="onboarding-oauth-card" id="codexOAuthCard">' +
         '<div class="onboarding-oauth-icon">🔑</div>' +
         '<div style="flex:1"><strong>' +
@@ -525,32 +478,6 @@
         '<div id="codexOAuthFlow" style="display:none;margin-top:12px"></div>' +
         (showBaseUrl ? '<p class="onboarding-copy">' + esc(t('onboarding_base_url_help')) + '</p>' : '') +
         (setup.unsupported_note ? '<p class="onboarding-copy">' + esc(setup.unsupported_note) + '</p>' : '');
-      return;
-    }
-
-    if (key === 'workspace') {
-      const workspaceOptions = _getOnboardingWorkspaceChoices()
-        .map((ws) => '<option value="' + esc(ws.path) + '">' + esc(ws.name || ws.path) + ' — ' + esc(ws.path) + '</option>')
-        .join('');
-      _setOnboardingNotice(t('onboarding_notice_workspace'), 'info');
-      body.innerHTML =
-        '<label class="onboarding-field"><span>' +
-        esc(t('onboarding_workspace_label')) +
-        '</span><select id="onboardingWorkspaceSelect" onchange="syncOnboardingWorkspaceSelect(this.value)">' +
-        workspaceOptions +
-        '</select></label>' +
-        '<label class="onboarding-field"><span>' +
-        esc(t('onboarding_workspace_or_path')) +
-        '</span><input id="onboardingWorkspaceInput" value="' +
-        esc(ONBOARDING.form.workspace || '') +
-        '" placeholder="' +
-        esc(t('onboarding_workspace_placeholder')) +
-        '" oninput="ONBOARDING.form.workspace=this.value"></label>' +
-        _renderOnboardingModelField();
-      const wsSel = $('onboardingWorkspaceSelect');
-      if (wsSel && ONBOARDING.form.workspace) wsSel.value = ONBOARDING.form.workspace;
-      const modelSel = $('onboardingModelSelect');
-      if (modelSel && ONBOARDING.form.model) modelSel.value = ONBOARDING.form.model;
       return;
     }
 
@@ -570,54 +497,14 @@
         '<p class="onboarding-copy">' +
         esc(t('onboarding_password_help')) +
         '</p>';
-      return;
     }
-
-    const finProvider = _getOnboardingSetupProvider(ONBOARDING.form.provider);
-    _setOnboardingNotice(t('onboarding_notice_finish'), 'success');
-    body.innerHTML =
-      '<div class="onboarding-summary">' +
-      '<div><strong>' +
-      esc(t('onboarding_provider_label')) +
-      '</strong><span>' +
-      esc((finProvider && finProvider.label) || ONBOARDING.form.provider || t('onboarding_not_set')) +
-      '</span></div>' +
-      '<div><strong>' +
-      esc(t('onboarding_model_label')) +
-      '</strong><span>' +
-      esc(_getOnboardingSelectedModel() || t('onboarding_not_set')) +
-      '</span></div>' +
-      '<div><strong>' +
-      esc(t('onboarding_workspace_label')) +
-      '</strong><span>' +
-      esc(ONBOARDING.form.workspace || t('onboarding_not_set')) +
-      '</span></div>' +
-      '<div><strong>' +
-      esc(t('onboarding_check_password')) +
-      '</strong><span>' +
-      esc(t(_getOnboardingPasswordSummaryKey(settings))) +
-      '</span></div></div>' +
-      (ONBOARDING.form.baseUrl
-        ? '<p class="onboarding-copy"><strong>' + esc(t('onboarding_base_url_label')) + '</strong> ' + esc(ONBOARDING.form.baseUrl) + '</p>'
-        : '') +
-      '<p class="onboarding-copy">' + t('onboarding_finish_help') + '</p>';
   }
-
-  window.syncOnboardingWorkspaceSelect = function (value) {
-    ONBOARDING.form.workspace = value;
-    const input = $('onboardingWorkspaceInput');
-    if (input) input.value = value;
-  };
 
   window.syncOnboardingProvider = function (value) {
     const provider = _getOnboardingSetupProvider(value);
     ONBOARDING.form.provider = value;
+    ONBOARDING.form.model = PREVIEW_DEFAULT_MODEL;
     if (provider) {
-      const choices = provider.models || [];
-      const cur = ONBOARDING.form.model;
-      if (!cur || !choices.some((m) => m.id === cur) || value === 'custom') {
-        ONBOARDING.form.model = provider.default_model || '';
-      }
       if (provider.requires_base_url) {
         ONBOARDING.form.baseUrl = ONBOARDING.form.baseUrl || provider.default_base_url || '';
       } else {
@@ -658,8 +545,8 @@
         ],
         probedKey: 'preview',
       };
-      if (!ONBOARDING.form.model) ONBOARDING.form.model = 'llama3.2';
     }
+    ONBOARDING.form.model = PREVIEW_DEFAULT_MODEL;
     _renderOnboardingBody();
   };
 
@@ -676,7 +563,7 @@
       (ONBOARDING.status.workspaces && ONBOARDING.status.workspaces.last) ||
       ONBOARDING.status.settings.default_workspace ||
       '';
-    ONBOARDING.form.model = ONBOARDING.status.settings.default_model || current.model || '';
+    ONBOARDING.form.model = PREVIEW_DEFAULT_MODEL;
     ONBOARDING.form.password = '';
     ONBOARDING.form.apiKey = '';
     ONBOARDING.form.baseUrl = current.base_url || '';
