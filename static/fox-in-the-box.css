@@ -250,6 +250,71 @@ body {
 }
 
 /* Session list & composer: tighter vertical rhythm */
+.sidebar {
+  border-right: none;
+}
+
+.rail {
+  background: var(--hover-bg);
+  border-right: none;
+}
+
+button[data-panel="workspaces"],
+button[data-panel="profiles"] {
+  display: none;
+}
+
+#profileChipWrap,
+#composerWorkspaceGroup {
+  display: none;
+}
+
+/* Sidebar panel headers: no bottom rule; “+” actions as filled chips */
+.panel-head {
+  border-bottom: none;
+}
+
+.panel-head-btn:has(svg > line[x1="12"][y1="5"]) {
+  width: calc(28px * var(--fitb-app-scale));
+  height: calc(28px * var(--fitb-app-scale));
+  min-width: calc(28px * var(--fitb-app-scale));
+  min-height: calc(28px * var(--fitb-app-scale));
+  border-radius: 5px;
+  box-shadow: 2px 2px 5px 0 rgb(184 160 137 / 40%);
+  outline: none;
+  transition: background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease,
+    border-color 0.2s ease;
+}
+
+.panel-head-btn:has(svg > line[x1="12"][y1="5"]):focus,
+.panel-head-btn:has(svg > line[x1="12"][y1="5"]):focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-default);
+}
+
+:root:not(.dark):not([data-skin]) .panel-head-btn:has(svg > line[x1="12"][y1="5"]) {
+  background: var(--color-primary-fill);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+
+:root:not(.dark):not([data-skin]) .panel-head-btn:has(svg > line[x1="12"][y1="5"]):hover {
+  background: var(--color-border);
+  color: var(--color-text);
+}
+
+:root.dark .panel-head-btn:has(svg > line[x1="12"][y1="5"]),
+:root:not(.dark)[data-skin] .panel-head-btn:has(svg > line[x1="12"][y1="5"]) {
+  background: var(--accent-bg-strong);
+  color: var(--text);
+}
+
+:root.dark .panel-head-btn:has(svg > line[x1="12"][y1="5"]):hover,
+:root:not(.dark)[data-skin] .panel-head-btn:has(svg > line[x1="12"][y1="5"]):hover {
+  background: var(--hover-bg);
+  color: var(--text);
+}
+
 .sidebar-header {
   padding: calc(14px * var(--fitb-app-scale)) calc(16px * var(--fitb-app-scale))
     calc(12px * var(--fitb-app-scale));
@@ -261,7 +326,7 @@ body {
   border-radius: var(--radius-md);
 }
 .session-meta {
-  font-size: calc(12px * var(--fitb-app-scale));
+  display: none;
 }
 .new-chat-btn {
   padding: calc(8px * var(--fitb-app-scale)) calc(11px * var(--fitb-app-scale));
@@ -284,7 +349,7 @@ body {
   border-radius: var(--radius-lg);
   max-width: var(--layout-max);
 }
-#msg {
+textarea#msg {
   font-size: calc(15px * var(--fitb-app-scale));
   line-height: 1.5;
   letter-spacing: 0.009375em;
