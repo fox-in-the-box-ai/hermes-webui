@@ -1012,6 +1012,27 @@
               </div>
             </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
+            <!-- Tailscale connection — issue #96 -->
+            <div class="settings-field" id="tsSettingsTile" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label>Tailscale connection</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Connect this Fox to your tailnet for secure remote access from your phone or another laptop. <a href="https://tailscale.com/" target="_blank" rel="noopener">Learn more</a>.</div>
+              <div id="tsConnectionRow" style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                <span id="tsBadge" class="ts-badge ts-badge-disconnected">Loading…</span>
+                <span id="tsTailnetUrl" style="font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;flex:1"></span>
+              </div>
+              <div id="tsActions" style="display:flex;gap:8px;flex-wrap:wrap">
+                <button id="tsConnectBtn" class="sm-btn" onclick="tsConnect()" style="padding:7px 12px;font-weight:600;display:none">Connect</button>
+                <button id="tsDisconnectBtn" class="sm-btn" onclick="tsDisconnect()" style="padding:7px 12px;color:var(--muted);display:none">Disconnect</button>
+              </div>
+              <details id="tsAdvanced" style="margin-top:10px">
+                <summary style="cursor:pointer;font-size:12px;color:var(--muted)">Advanced (auth key)</summary>
+                <div style="margin-top:8px">
+                  <input type="password" id="tsAuthKey" placeholder="tskey-auth-..." autocomplete="off" spellcheck="false" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">
+                  <div style="font-size:11px;color:var(--muted);margin-top:6px">Paste a reusable auth key to skip the browser flow. <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener">Get one here</a>.</div>
+                </div>
+              </details>
+              <div id="tsMessage" style="font-size:11px;color:var(--muted);margin-top:8px;min-height:14px"></div>
+            </div>
             <!-- Tailscale device hostname — issue #44 -->
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label for="settingsHostname" data-i18n="settings_label_hostname">Device name (Tailscale)</label>
