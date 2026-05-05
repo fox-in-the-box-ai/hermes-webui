@@ -1661,6 +1661,18 @@ def handle_get(handler, parsed) -> bool:
         from api.ollama import handle_get_models
         return j(handler, handle_get_models(handler))
 
+    # ── Local model download manager (issue #10) ──
+    # Distinct prefix from /api/models (the chat-input model picker) to
+    # avoid collision. /api/local-models/* is the on-disk model store.
+    if parsed.path == "/api/local-models":
+        from api.models_download import handle_get_models as handle_local_models
+        return j(handler, handle_local_models(handler))
+
+    if parsed.path.startswith("/api/local-models/") and parsed.path.endswith("/progress"):
+        from api.models_download import handle_progress_sse
+        model_id = parsed.path[len("/api/local-models/"):-len("/progress")]
+        return handle_progress_sse(handler, model_id)
+
     if parsed.path == "/api/models":
         return j(handler, get_available_models())
 
@@ -2372,6 +2384,28 @@ def handle_post(handler, parsed) -> bool:
         from api.ollama import delete_model
         result = delete_model(body.get("model", ""))
         return j(handler, result, status=200 if result.get("ok") else 400)
+
+    # ── Local model download manager (POST) — issue #10 ──
+    # Path-param routing via prefix match because hermes-webui dispatches
+    # by exact path. Keeps the same POST-not-DELETE convention from #67.
+    if parsed.path.startswith("/api/local-models/"):
+        suffix = parsed.path[len("/api/local-models/"):]
+        if "/" in suffix:
+            model_id, action = suffix.rsplit("/", 1)
+        else:
+            model_id, action = "", ""
+        if action == "download":
+            from api.models_download import handle_post_download
+            r = handle_post_download(handler, body, model_id)
+            return j(handler, r, status=200 if r.get("ok") else 400)
+        if action == "cancel":
+            from api.models_download import handle_post_cancel
+            r = handle_post_cancel(handler, body, model_id)
+            return j(handler, r, status=200 if r.get("ok") else 400)
+        if action == "delete":
+            from api.models_download import handle_post_delete
+            r = handle_post_delete(handler, body, model_id)
+            return j(handler, r, status=200 if r.get("ok") else 400)
 
     if parsed.path == "/api/session/new":
         try:

@@ -1007,6 +1007,13 @@
               <div id="settingsHostnameStatus" style="font-size:11px;color:var(--muted);margin-top:6px;min-height:14px"></div>
               <button class="sm-btn" onclick="saveHostname()" style="margin-top:8px;width:100%;padding:7px;font-weight:600" data-i18n="settings_save_hostname">Apply hostname</button>
             </div>
+            <!-- Local AI models — issue #10 -->
+            <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label data-i18n="settings_label_local_models">Local AI models</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_local_models">Download AI models to run on your computer. Used as a fallback when your provider is unavailable, and as the local-AI option for new users without an API key (coming in v0.4.1). Models are stored in <code>/data/models/</code> and persist across container restarts.</div>
+              <div id="localModelsDisk" style="font-size:11px;color:var(--muted);margin-bottom:6px"></div>
+              <div id="localModelsList"></div>
+            </div>
           </div>
       </div>
     </div>

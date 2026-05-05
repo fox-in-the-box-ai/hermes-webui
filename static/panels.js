@@ -3174,6 +3174,7 @@ async function loadSettingsPanel(){
     loadProvidersPanel(); // load provider cards in background
     loadHostnameSettings(); // tailscale hostname (issue #44) — best-effort
     loadOllamaLocal(); // local Ollama detection (issue #66) — best-effort
+    loadLocalModels(); // local model download manager (issue #10) — best-effort
     switchSettingsSection(_settingsSection);
   }catch(e){
     showToast(t('settings_load_failed')+e.message);
@@ -3420,6 +3421,213 @@ async function refreshOllamaLocal(){
     await fetch('/api/ollama/refresh', {method: 'POST'});
   }catch(e){}
   loadOllamaLocal();
+}
+
+// ── Local model download manager (issue #10) ──────────────────────────────
+
+// Map of active SSE EventSources keyed by model id, so we can cancel them
+// when the Settings panel closes / the model finishes / the user navigates.
+const _localModelStreams = new Map();
+
+async function loadLocalModels(){
+  const listEl = document.getElementById('localModelsList');
+  const diskEl = document.getElementById('localModelsDisk');
+  if(!listEl) return;
+  try{
+    const data = await api('/api/local-models');
+    const models = (data && data.models) || [];
+    if(diskEl){
+      const total = data.total_size_bytes || 0;
+      const installedCount = models.filter(m => m.installed).length;
+      diskEl.textContent = total > 0
+        ? `${_formatBytes(total)} on disk · ${installedCount} of ${models.length} installed`
+        : `0 of ${models.length} installed`;
+    }
+    listEl.innerHTML = '';
+    listEl.style.display = 'flex';
+    listEl.style.flexDirection = 'column';
+    listEl.style.gap = '6px';
+    for(const m of models){
+      _renderLocalModelRow(listEl, m);
+      // If a download is already running on the server side, attach an SSE
+      // stream so we see progress without the user having to hit Download.
+      const state = m.state || {};
+      if(state.status === 'running' && !_localModelStreams.has(m.id)){
+        _attachLocalModelStream(m.id);
+      }
+    }
+  }catch(e){
+    listEl.textContent = 'Could not load local models.';
+  }
+}
+
+function _renderLocalModelRow(parent, m){
+  let row = document.getElementById('localModelRow-' + m.id);
+  if(!row){
+    row = document.createElement('div');
+    row.id = 'localModelRow-' + m.id;
+    row.style.cssText = 'padding:10px;border:1px solid var(--border2);border-radius:6px;background:var(--bg)';
+    parent.appendChild(row);
+  }
+  const state = m.state || {};
+  const status = state.status || (m.installed ? 'completed' : 'idle');
+  const pct = (state.bytes_total > 0)
+    ? Math.min(100, Math.round((state.bytes_downloaded / state.bytes_total) * 100))
+    : 0;
+
+  let statusLine = '';
+  if(m.installed){
+    statusLine = `Installed · ${_formatBytes(m.size_on_disk_bytes)}`;
+  }else if(status === 'running'){
+    statusLine = `Downloading · ${_formatBytes(state.bytes_downloaded)} / ${_formatBytes(state.bytes_total || m.expected_size_bytes)} · ${pct}%`;
+  }else if(status === 'failed'){
+    statusLine = `Failed · ${state.error || 'unknown error'}`;
+  }else if(status === 'cancelled'){
+    statusLine = 'Cancelled';
+  }else{
+    statusLine = `Not installed · ${_formatBytes(m.expected_size_bytes)} download`;
+  }
+
+  // Action button — context-sensitive single primary action.
+  let actionsHtml = '';
+  if(m.installed){
+    actionsHtml = `<button class="btn-tiny" onclick="deleteLocalModel('${_esc(m.id)}', ${m.size_on_disk_bytes})" style="color:var(--accent)">Delete</button>`;
+  }else if(status === 'running'){
+    actionsHtml = `<button class="btn-tiny" onclick="cancelLocalModel('${_esc(m.id)}')">Cancel</button>`;
+  }else{
+    actionsHtml = `<button class="btn-tiny" onclick="downloadLocalModel('${_esc(m.id)}')">Download</button>`;
+  }
+
+  // Progress bar visible only during a running or recently-failed run.
+  let progressHtml = '';
+  if(status === 'running' || status === 'failed' || status === 'cancelled'){
+    const barColor = status === 'failed' ? 'var(--accent)' :
+                     status === 'cancelled' ? 'var(--muted)' :
+                     'var(--success, #2ec27e)';
+    progressHtml = `
+      <div style="margin-top:8px;height:6px;background:var(--code-bg);border-radius:3px;overflow:hidden">
+        <div style="width:${pct}%;height:100%;background:${barColor};transition:width 0.2s ease"></div>
+      </div>`;
+  }
+
+  row.innerHTML = `
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">
+      <div style="min-width:0;flex:1">
+        <div style="font-weight:600;font-size:13px">${_esc(m.name)}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">${_esc(m.description || '')}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:6px">${_esc(statusLine)}</div>
+      </div>
+      <div style="display:flex;flex-shrink:0">${actionsHtml}</div>
+    </div>
+    ${progressHtml}
+  `;
+}
+
+function _attachLocalModelStream(modelId){
+  // Close any existing stream for this id (defensive — shouldn't happen).
+  const existing = _localModelStreams.get(modelId);
+  if(existing){ try{ existing.close(); }catch(e){} }
+  const es = new EventSource(`/api/local-models/${encodeURIComponent(modelId)}/progress`);
+  _localModelStreams.set(modelId, es);
+  es.onmessage = (ev) => {
+    try{
+      const state = JSON.parse(ev.data);
+      _updateLocalModelRowFromState(modelId, state);
+      if(['completed','failed','cancelled'].includes(state.status)){
+        es.close();
+        _localModelStreams.delete(modelId);
+        // Refresh disk-usage line + final installed/idle status.
+        loadLocalModels();
+      }
+    }catch(e){}
+  };
+  es.onerror = () => {
+    es.close();
+    _localModelStreams.delete(modelId);
+  };
+}
+
+function _updateLocalModelRowFromState(modelId, state){
+  // Lightweight in-place update during streaming, so the bar animates
+  // smoothly without re-rendering every other row in the list.
+  const row = document.getElementById('localModelRow-' + modelId);
+  if(!row) return;
+  // Synthesize a minimal model object — full reload via loadLocalModels()
+  // happens on terminal states.
+  const fakeModel = {
+    id: modelId,
+    name: row.querySelector('div > div > div')?.textContent || modelId,
+    description: '',
+    expected_size_bytes: state.bytes_total || 0,
+    size_on_disk_bytes: state.bytes_downloaded || 0,
+    installed: state.status === 'completed',
+    state: state,
+  };
+  // Pull `name` and `description` from the existing rendered row to
+  // avoid losing them on partial state updates.
+  const nameEl = row.querySelector('[style*="font-weight:600"]');
+  const descEl = nameEl && nameEl.nextElementSibling;
+  if(nameEl) fakeModel.name = nameEl.textContent;
+  if(descEl) fakeModel.description = descEl.textContent;
+  _renderLocalModelRow(row.parentElement, fakeModel);
+}
+
+async function downloadLocalModel(modelId){
+  try{
+    const r = await fetch(`/api/local-models/${encodeURIComponent(modelId)}/download`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}',
+    });
+    const result = await r.json();
+    if(!result.ok){
+      showToast(result.error || 'Download failed to start');
+      return;
+    }
+    showToast(`Downloading ${modelId}…`);
+    _attachLocalModelStream(modelId);
+    // Initial row update so the user sees "Downloading" immediately,
+    // before the first SSE event arrives.
+    _updateLocalModelRowFromState(modelId, result.state || {status:'running', bytes_downloaded:0, bytes_total:0});
+  }catch(e){
+    showToast('Network error');
+  }
+}
+
+async function cancelLocalModel(modelId){
+  if(!confirm(`Cancel download of ${modelId}? Partial bytes are kept on disk so a future Download resumes from where you stopped.`)) return;
+  try{
+    const r = await fetch(`/api/local-models/${encodeURIComponent(modelId)}/cancel`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:'{}',
+    });
+    const result = await r.json();
+    if(!result.ok){
+      showToast(result.error || 'Cancel failed');
+      return;
+    }
+    showToast('Cancel requested');
+  }catch(e){
+    showToast('Network error');
+  }
+}
+
+async function deleteLocalModel(modelId, sizeHint){
+  const sizeStr = _formatBytes(sizeHint || 0);
+  const msg = sizeStr ? `Delete ${modelId}? This will free ${sizeStr}.` : `Delete ${modelId}?`;
+  if(!confirm(msg)) return;
+  try{
+    const r = await fetch(`/api/local-models/${encodeURIComponent(modelId)}/delete`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:'{}',
+    });
+    const result = await r.json();
+    if(!result.ok){
+      showToast(result.error || 'Delete failed');
+      return;
+    }
+    const freed = result.freed_bytes ? ` — freed ${_formatBytes(result.freed_bytes)}` : '';
+    showToast(`Deleted ${modelId}${freed}`);
+    loadLocalModels();
+  }catch(e){
+    showToast('Network error');
+  }
 }
 
 async function useOllamaModel(name){
