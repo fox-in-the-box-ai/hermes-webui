@@ -2103,16 +2103,24 @@ def _run_agent_streaming(
                                     _part['text'] = _strip_xml_tool_calls(_part['text'])
 
                 # ── Detect silent agent failure (no assistant reply produced) ──
-                # When the agent catches an auth/network error internally it may return
-                # an empty final_response without raising — the stream would end with
-                # a done event containing zero assistant messages, leaving the user with
-                # no feedback. Emit an apperror so the client shows an inline error.
+                # Two sub-cases that both leave the user with nothing usable:
+                #   (a) `_token_sent=False`: the agent caught an internal error
+                #       (auth/network/quota) without raising — empty result, no
+                #       streamed text, spinner just disappears.
+                #   (b) `_token_sent=True`: the SSE stream started, tokens were
+                #       being delivered, then the provider dropped the connection
+                #       (mid-stream rate limit, gateway timeout, network reset)
+                #       and the agent's internal handler swallowed the failure
+                #       without re-raising. Result has no completed assistant
+                #       message even though the user already saw partial text.
+                #       Pre-#89 this branch only handled (a) — the `not _token_sent`
+                #       gate masked (b) silently. Now both paths emit an apperror
+                #       AND persist a recoverable assistant stub. (#89)
                 _assistant_added = any(
                     m.get('role') == 'assistant' and str(m.get('content') or '').strip()
                     for m in (result.get('messages') or [])
                 )
-                # _token_sent tracks whether on_token() was called (any streamed text)
-                if not _assistant_added and not _token_sent:
+                if not _assistant_added:
                     _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
                     _err_str = str(_last_err) if _last_err else ''
                     _err_lower = _err_str.lower()
@@ -2146,6 +2154,11 @@ def _run_agent_streaming(
                             'your API key is invalid. Run `hermes model` in your terminal to '
                             'update credentials, then restart the WebUI.'
                         )
+                    elif _token_sent:
+                        # Mid-stream break — the user already saw partial output.
+                        _err_label = 'Stream interrupted'
+                        _err_type = 'stream_interrupted'
+                        _err_hint = 'The provider closed the connection before the response completed. Send the message again to retry.'
                     else:
                         _err_label = 'No response received'
                         _err_type = 'no_response'
@@ -2164,9 +2177,20 @@ def _run_agent_streaming(
                     s.pending_user_message = None
                     s.pending_attachments = []
                     s.pending_started_at = None
+                    # Preserve partial text the user already saw so the chat
+                    # bubble doesn't appear to vanish on page reload. (#89)
+                    _partial = STREAM_PARTIAL_TEXT.get(stream_id, '') if _token_sent else ''
+                    if _partial:
+                        _persist_content = (
+                            f"{_partial}\n\n*[Stream interrupted: {_err_label}"
+                            + (f' — {_err_str}' if _err_str else '')
+                            + ']*'
+                        )
+                    else:
+                        _persist_content = f'**{_err_label}:** {_err_str or _err_label}\n\n*{_err_hint}*'
                     s.messages.append({
                         'role': 'assistant',
-                        'content': f'**{_err_label}:** {_err_str or _err_label}\n\n*{_err_hint}*',
+                        'content': _persist_content,
                         'timestamp': int(time.time()),
                         '_error': True,
                     })
@@ -2518,9 +2542,25 @@ def _run_agent_streaming(
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
+                # If tokens already streamed before the exception, the user
+                # has been watching a partial response — preserve it on
+                # reload instead of replacing it with just the error. (#89)
+                _exc_partial = STREAM_PARTIAL_TEXT.get(stream_id, '')
+                if _exc_partial:
+                    _exc_persist = (
+                        f"{_exc_partial}\n\n*[Stream interrupted: {_exc_label}"
+                        + (f' — {err_str}' if err_str else '')
+                        + ']*'
+                        + (f'\n*{_exc_hint}*' if _exc_hint else '')
+                    )
+                else:
+                    _exc_persist = (
+                        f'**{_exc_label}:** {err_str}'
+                        + (f'\n\n*{_exc_hint}*' if _exc_hint else '')
+                    )
                 s.messages.append({
                     'role': 'assistant',
-                    'content': f'**{_exc_label}:** {err_str}' + (f'\n\n*{_exc_hint}*' if _exc_hint else ''),
+                    'content': _exc_persist,
                     'timestamp': int(time.time()),
                     '_error': True,
                 })
