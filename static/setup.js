@@ -76,28 +76,53 @@ function renderStep1() {
   const body = renderWelcomeBody(state.welcomeText)
     || '<p>Let&apos;s get you set up. This will only take a minute.</p>';
 
-  // Ollama branch — issue #11 Option B. If a host-side Ollama daemon is
-  // detected with at least one model installed, surface a fast-path that
-  // skips the API key step entirely and drops the user into chat with a
-  // local model. Falls back gracefully when the probe fails.
-  let ollamaBlock = '';
+  // Local-model branch priority (issue #69):
+  //   1. Ollama detected with a model installed → use it (fastest, user already
+  //      configured something locally)
+  //   2. Bundled llama.cpp model already on disk → use it (instant, no download)
+  //   3. Bundled llama.cpp installable (in-container, supervisord present) →
+  //      offer download CTA (~2.5 GB)
+  //   4. None → only the OpenRouter path (Next button) and skip footer.
+  let localBlock = '';
   if (state.ollama && state.ollama.running && Array.isArray(state.ollama.models) && state.ollama.models.length > 0) {
     const first = state.ollama.models[0];
     const modelName = escapeHtml(first.name || '');
-    ollamaBlock = `
+    localBlock = `
       <div class="ollama-detected">
         <div class="ollama-detected-title">Local model detected</div>
         <p>You have <code>${modelName}</code> running on your computer via Ollama. Skip the API key step and chat with it locally — your data never leaves your machine.</p>
         <button class="btn btn-secondary" onclick="useLocalOllama('${escapeHtml(first.name || '')}')">Use ${modelName}</button>
       </div>
     `;
+  } else if (state.localFallback
+             && state.localFallback.ui_state !== 'no-supervisor'
+             && state.localFallback.ui_state !== 'missing-model-registry') {
+    if (state.localFallback.model_installed) {
+      localBlock = `
+        <div class="ollama-detected">
+          <div class="ollama-detected-title">Bundled local model ready</div>
+          <p>Phi-4-mini is already on disk. Skip the API key step and chat with it locally — your data never leaves your machine.</p>
+          <button class="btn btn-secondary" onclick="useLlamaCppFallback()">Use bundled local model</button>
+        </div>
+      `;
+    } else {
+      const bytes = state.localFallback.model_size_bytes || 0;
+      const sizeText = bytes > 0 ? ` (~${(bytes / 1073741824).toFixed(1)} GB)` : '';
+      localBlock = `
+        <div class="ollama-detected">
+          <div class="ollama-detected-title">Run a local model — no API key needed</div>
+          <p>Download Phi-4-mini${sizeText} and chat without an internet connection. Your data never leaves your machine.</p>
+          <button class="btn btn-secondary" onclick="useLlamaCppFallback()">Download &amp; use local model</button>
+        </div>
+      `;
+    }
   }
 
   return `
     <div class="step">
       <h1>Fox in the Box</h1>
       ${body}
-      ${ollamaBlock}
+      ${localBlock}
       <div class="btn-actions">
         <button class="btn btn-primary" onclick="advance(2)">Next</button>
       </div>
@@ -255,6 +280,118 @@ async function useLocalOllama(modelName) {
   setTimeout(() => { window.location.href = '/'; }, 800);
 }
 
+// Issue #69: bundled llama.cpp fast-path. Toggles on local fallback (kicks
+// download via #10's manager if needed), polls status, shows progress in
+// place of the welcome step, and finishes onboarding when llama-server is
+// ready.
+function _renderLocalFallbackProgress(snapshot) {
+  const container = document.getElementById('step-container');
+  if (!container) return;
+
+  const ui = (snapshot && snapshot.ui_state) || 'starting';
+  const ms = snapshot && snapshot.model_state;
+  const downloaded = ms && typeof ms.bytes_downloaded === 'number' ? ms.bytes_downloaded : 0;
+  const total = ms && typeof ms.bytes_total === 'number' && ms.bytes_total > 0
+    ? ms.bytes_total
+    : (snapshot && snapshot.model_size_bytes) || 0;
+  const pct = total > 0 ? Math.min(100, Math.floor((downloaded / total) * 100)) : 0;
+  const mb = (n) => (n / 1048576).toFixed(0);
+
+  let title, detail, showBar;
+  switch (ui) {
+    case 'needs-download':
+      title = 'Preparing download…';
+      detail = 'Queueing the model download.';
+      showBar = false;
+      break;
+    case 'downloading':
+      title = 'Downloading local model';
+      detail = total > 0
+        ? `${mb(downloaded)} / ${mb(total)} MB (${pct}%)`
+        : `${mb(downloaded)} MB downloaded`;
+      showBar = true;
+      break;
+    case 'starting':
+      title = 'Starting local model server…';
+      detail = 'Almost there.';
+      showBar = false;
+      break;
+    case 'warming':
+      title = 'Warming up the model…';
+      detail = 'Loading weights into memory.';
+      showBar = false;
+      break;
+    case 'ready':
+      title = 'Local model is ready';
+      detail = 'Opening Fox…';
+      showBar = false;
+      break;
+    default:
+      title = 'Setting up local model…';
+      detail = '';
+      showBar = false;
+  }
+
+  const bar = showBar
+    ? `<div class="dl-bar"><div class="dl-bar-fill" style="width:${pct}%"></div></div>`
+    : '';
+
+  container.innerHTML = `
+    <div class="step">
+      <h1>${escapeHtml(title)}</h1>
+      <p>${escapeHtml(detail)}</p>
+      ${bar}
+      <div class="hint">You can close this window — the download keeps going in the background.</div>
+    </div>
+  `;
+}
+
+async function useLlamaCppFallback() {
+  // Kick the toggle. enable() returns immediately with the current snapshot;
+  // download (if needed) and llama-server start happen in background threads.
+  let snapshot;
+  try {
+    const r = await post('/api/local-fallback/enable', {});
+    if (!r.data || r.data.enabled === false) {
+      alert('Could not enable local fallback: ' + ((r.data && r.data.error) || 'unknown error'));
+      return;
+    }
+    snapshot = r.data;
+  } catch (e) {
+    alert('Network error while enabling local fallback.');
+    return;
+  }
+
+  _renderLocalFallbackProgress(snapshot);
+
+  // Poll until ui_state === 'ready'. Phi-4-mini is ~2.5 GB; on a typical
+  // residential connection this can take several minutes, so we poll
+  // patiently rather than time out.
+  const startedAt = Date.now();
+  const maxMs = 30 * 60 * 1000;  // 30 minutes — generous for slow links
+  const tick = async () => {
+    if (Date.now() - startedAt > maxMs) {
+      alert('Local model setup is taking longer than expected. Check Settings → Providers later.');
+      return;
+    }
+    let s;
+    try {
+      s = await getJson('/api/local-fallback/status');
+    } catch (e) {
+      setTimeout(tick, 3000);
+      return;
+    }
+    _renderLocalFallbackProgress(s);
+    if (s.ui_state === 'ready') {
+      try { await post('/api/setup/complete', { tailscale_connected: false }); } catch (e) {}
+      setTimeout(() => { window.location.href = '/'; }, 800);
+      return;
+    }
+    setTimeout(tick, 2000);
+  };
+  setTimeout(tick, 1500);
+}
+
 // ── Complete setup ───────────────────────────────────────────────────────────
 
 async function completSetup() {
@@ -283,9 +420,9 @@ async function completSetup() {
 // ── Boot ─────────────────────────────────────────────────────────────────────
 
 async function loadOnboardingState() {
-  // Welcome content (externalized) and Ollama detection run in parallel —
-  // both are best-effort; the wizard renders with sensible fallbacks if
-  // either probe fails.
+  // Welcome content (externalized), Ollama detection, and bundled-llama.cpp
+  // status all run in parallel — the wizard renders with sensible fallbacks
+  // if any probe fails. (#69 added local-fallback to the probe set.)
   const tasks = [
     getJson('/api/setup/welcome').then(d => { state.welcomeText = d.text || null; }).catch(() => {}),
     getJson('/api/ollama/status').then(async (s) => {
@@ -300,6 +437,13 @@ async function loadOnboardingState() {
         state.ollama = { running: false, models: [] };
       }
     }).catch(() => { state.ollama = { running: false, models: [] }; }),
+    getJson('/api/local-fallback/status').then(s => {
+      // s.ui_state ∈ {disabled, needs-download, downloading, starting,
+      //   warming, ready, no-supervisor, missing-model-registry}.
+      // We care about: "ready" (instant fast-path) and supervisor-available
+      // states (offer the download CTA). "no-supervisor" hides the CTA.
+      state.localFallback = s || null;
+    }).catch(() => { state.localFallback = null; }),
   ];
   await Promise.all(tasks);
 }
