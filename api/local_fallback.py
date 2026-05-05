@@ -389,6 +389,54 @@ def disable() -> dict[str, Any]:
     return get_status()
 
 
+# ── Remote-health probe (#9 polish recovery banner) ───────────────────────
+
+
+def get_remote_health() -> dict[str, Any]:
+    """Lightweight reachability probe used by the recovery banner (#9
+    polish). Returns ``{remote_healthy, tested_url, error}``.
+
+    Strategy: GET https://openrouter.ai/api/v1/models with a 5s timeout.
+    OpenRouter is the FITB default provider; its public /models endpoint
+    returns 200 without auth, so a 200 is a strong signal that (a) the
+    user has internet, and (b) the most common remote provider is
+    reachable. We don't need per-provider probing for the banner UX —
+    if OpenRouter is up, the user's chosen provider is *probably* up too,
+    and if not, the user's next chat will fail and the modal re-fires.
+
+    Cached for 30s in-process so repeated polls don't hammer OpenRouter
+    when multiple browser tabs are open.
+    """
+    now = time.time()
+    cache = _remote_health_cache
+    if cache and (now - cache["at"]) < 30.0:
+        return cache["result"]
+
+    url = "https://openrouter.ai/api/v1/models"
+    result: dict[str, Any]
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "fitb-remote-health/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            result = {
+                "remote_healthy": 200 <= r.status < 300,
+                "tested_url": url,
+                "error": "",
+            }
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        result = {
+            "remote_healthy": False,
+            "tested_url": url,
+            "error": str(exc),
+        }
+    _remote_health_cache.update(at=now, result=result)
+    return result
+
+
+_remote_health_cache: dict[str, Any] = {}
+
+
 # ── Route handlers ─────────────────────────────────────────────────────────
 
 
@@ -405,3 +453,8 @@ def handle_post_enable(handler, body: dict) -> dict[str, Any]:
 def handle_post_disable(handler, body: dict) -> dict[str, Any]:
     """POST /api/local-fallback/disable — toggle off."""
     return disable()
+
+
+def handle_get_remote_health(handler) -> dict[str, Any]:
+    """GET /api/local-fallback/remote-health — recovery banner probe (#9)."""
+    return get_remote_health()

@@ -774,6 +774,90 @@ pre[class*=language-] {
   display: none !important;
 }
 
+/* ── Local-fallback polish: reactive modal + recovery banner (issue #9) ─ */
+
+.fitb-fb-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.fitb-fb-modal {
+  background: var(--bg-secondary, #1f2024);
+  color: var(--text-primary, #f0f0f2);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 24px 24px 20px;
+  width: 100%;
+  max-width: 460px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.fitb-fb-modal h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.fitb-fb-modal p {
+  margin: 0 0 14px;
+  font-size: 13px;
+  opacity: 0.85;
+  line-height: 1.5;
+}
+
+.fitb-fb-modal-status {
+  font-size: 12px;
+  min-height: 16px;
+  margin: 8px 0 4px;
+  opacity: 0.8;
+}
+
+.fitb-fb-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.fitb-fb-banner {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9997;
+  margin-top: 10px;
+  background: rgba(45, 212, 191, 0.12);
+  border: 1px solid rgba(45, 212, 191, 0.4);
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  font-size: 13px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+  max-width: 90vw;
+}
+
+.fitb-fb-banner-text {
+  flex: 1;
+}
+
+.fitb-fb-banner-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.fitb-fb-banner .fitb-btn {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
 /* ── Tailscale connection tile (issue #96) ────────────────────────────── */
 
 .ts-badge {

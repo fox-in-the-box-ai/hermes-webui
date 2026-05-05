@@ -989,6 +989,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isModelNotFound=d.type==='model_not_found';
           const isNoResponse=d.type==='no_response';
           const isStreamInterrupted=d.type==='stream_interrupted'; // mid-stream provider drop (#89)
+          // FITB: dispatch a tagged event so the local-fallback polish module
+          // (fallback-polish.js, #9 polish) can react to remote failures
+          // without monkey-patching this handler. Surgical one-line hook.
+          try{ window.dispatchEvent(new CustomEvent('fitb:stream-error',{detail:{type:d.type||'unknown',message:d.message||''}})); }catch(_){}
           const label=isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response received':isStreamInterrupted?'Stream interrupted':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`});

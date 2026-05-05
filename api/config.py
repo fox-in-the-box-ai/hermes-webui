@@ -2325,6 +2325,19 @@ _SETTINGS_DEFAULTS = {
     # shown. Once true, the prompt never re-fires — set on Save or Skip in
     # the modal, or implicitly when the user sets a hostname in Settings.
     "hostname_prompted": False,
+    # FITB: power-user Tailscale flags surfaced in the Settings → Network
+    # advanced accordion (#96 phase 2). Backend's _build_up_argv() already
+    # accepts these; persisting them here lets the UI pre-populate on
+    # revisit and the /up endpoint merge them with body opts. Empty-string
+    # defaults preserve current Tailscale defaults (login.tailscale.com,
+    # no advertise, no exit node). accept_dns defaults TRUE because
+    # Tailscale itself defaults true and most users want MagicDNS.
+    "tailscale_login_server": "",
+    "tailscale_advertise_routes": "",
+    "tailscale_advertise_tags": "",
+    "tailscale_accept_routes": False,
+    "tailscale_accept_dns": True,
+    "tailscale_exit_node": "",
 }
 _SETTINGS_LEGACY_DROP_KEYS = {"assistant_language", "bubble_layout", "default_model"}
 _SETTINGS_THEME_VALUES = {"light", "dark", "system"}
@@ -2441,6 +2454,8 @@ _SETTINGS_BOOL_KEYS = {
     "api_redact_enabled",
     "local_fallback_enabled",
     "hostname_prompted",
+    "tailscale_accept_routes",
+    "tailscale_accept_dns",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")

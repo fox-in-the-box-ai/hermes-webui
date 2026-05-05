@@ -1025,10 +1025,49 @@
                 <button id="tsDisconnectBtn" class="sm-btn" onclick="tsDisconnect()" style="padding:7px 12px;color:var(--muted);display:none">Disconnect</button>
               </div>
               <details id="tsAdvanced" style="margin-top:10px">
-                <summary style="cursor:pointer;font-size:12px;color:var(--muted)">Advanced (auth key)</summary>
-                <div style="margin-top:8px">
-                  <input type="password" id="tsAuthKey" placeholder="tskey-auth-..." autocomplete="off" spellcheck="false" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">
-                  <div style="font-size:11px;color:var(--muted);margin-top:6px">Paste a reusable auth key to skip the browser flow. <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener">Get one here</a>.</div>
+                <summary style="cursor:pointer;font-size:12px;color:var(--muted)">Advanced</summary>
+                <div style="margin-top:10px;padding-left:6px;border-left:2px solid var(--border)">
+                  <div style="margin-bottom:10px">
+                    <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Auth key (skip browser)</label>
+                    <input type="password" id="tsAuthKey" placeholder="tskey-auth-..." autocomplete="off" spellcheck="false" style="width:100%;padding:7px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">
+                    <div style="font-size:10px;color:var(--muted);margin-top:3px">Paste a reusable key to skip browser auth. <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener">Get one</a>.</div>
+                  </div>
+                  <div style="margin-bottom:10px">
+                    <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Login server (e.g. headscale)</label>
+                    <input type="text" id="tsLoginServer" placeholder="https://login.tailscale.com" autocomplete="off" spellcheck="false" style="width:100%;padding:7px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">
+                    <div style="font-size:10px;color:var(--muted);margin-top:3px">Custom control plane URL. Leave blank for Tailscale's cloud.</div>
+                  </div>
+                  <div style="margin-bottom:10px">
+                    <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Advertise routes (subnet router)</label>
+                    <input type="text" id="tsAdvertiseRoutes" placeholder="10.0.0.0/24, 192.168.1.0/24" autocomplete="off" spellcheck="false" style="width:100%;padding:7px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">
+                    <div style="font-size:10px;color:var(--muted);margin-top:3px">CIDRs this Fox should advertise to the tailnet. Comma-separated.</div>
+                  </div>
+                  <div style="margin-bottom:10px">
+                    <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Advertise tags (ACL identity)</label>
+                    <input type="text" id="tsAdvertiseTags" placeholder="tag:fox, tag:server" autocomplete="off" spellcheck="false" style="width:100%;padding:7px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">
+                    <div style="font-size:10px;color:var(--muted);margin-top:3px">Comma-separated <code>tag:</code> strings. Tags must be allowed by your tailnet ACL.</div>
+                  </div>
+                  <div style="margin-bottom:10px">
+                    <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Exit node (route all traffic via)</label>
+                    <input type="text" id="tsExitNode" placeholder="100.x.x.x or peer-name" autocomplete="off" spellcheck="false" style="width:100%;padding:7px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">
+                    <div style="font-size:10px;color:var(--muted);margin-top:3px">IP or hostname of a tailnet peer to use as an exit node. Leave blank for direct.</div>
+                  </div>
+                  <div style="margin-bottom:8px">
+                    <label style="font-size:12px;color:var(--text);display:flex;align-items:center;gap:6px;cursor:pointer">
+                      <input type="checkbox" id="tsAcceptRoutes" style="margin:0">
+                      Accept advertised routes from peers
+                    </label>
+                    <div style="font-size:10px;color:var(--muted);margin-top:3px;margin-left:22px">Use other tailnet peers' subnet-router routes.</div>
+                  </div>
+                  <div style="margin-bottom:8px">
+                    <label style="font-size:12px;color:var(--text);display:flex;align-items:center;gap:6px;cursor:pointer">
+                      <input type="checkbox" id="tsAcceptDns" style="margin:0" checked>
+                      Accept MagicDNS from tailnet
+                    </label>
+                    <div style="font-size:10px;color:var(--muted);margin-top:3px;margin-left:22px">Uncheck if you have a conflicting local resolver.</div>
+                  </div>
+                  <button class="sm-btn" onclick="tsSaveAdvanced()" style="margin-top:8px;width:100%;padding:7px;font-weight:600">Save advanced settings</button>
+                  <div id="tsAdvancedStatus" style="font-size:11px;color:var(--muted);margin-top:6px;min-height:14px"></div>
                 </div>
               </details>
               <div id="tsMessage" style="font-size:11px;color:var(--muted);margin-top:8px;min-height:14px"></div>
@@ -1145,5 +1184,6 @@
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/fox-in-the-box.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/hostname-prompt.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/fallback-polish.js?v=__WEBUI_VERSION__" defer></script>
 </body>
 </html>

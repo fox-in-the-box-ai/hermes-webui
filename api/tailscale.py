@@ -80,6 +80,38 @@ def _run_tailscale(args: list[str], timeout: float = 10.0) -> tuple[int, str, st
 # ── Status snapshot ────────────────────────────────────────────────────────
 
 
+_POWER_USER_KEYS = (
+    "tailscale_login_server",
+    "tailscale_advertise_routes",
+    "tailscale_advertise_tags",
+    "tailscale_accept_routes",
+    "tailscale_accept_dns",
+    "tailscale_exit_node",
+)
+
+
+def _load_persisted_opts() -> dict[str, Any]:
+    """Read the six power-user Tailscale flags from settings.json (#96
+    phase 2). Returns the body shape `_build_up_argv()` expects:
+      {login_server, advertise_routes, advertise_tags, accept_routes,
+       accept_dns, exit_node}
+    Missing values fall back to settings defaults (empty / false / true).
+    """
+    try:
+        from api.config import load_settings
+        s = load_settings()
+    except Exception:
+        return {}
+    return {
+        "login_server": s.get("tailscale_login_server") or "",
+        "advertise_routes": s.get("tailscale_advertise_routes") or "",
+        "advertise_tags": s.get("tailscale_advertise_tags") or "",
+        "accept_routes": bool(s.get("tailscale_accept_routes", False)),
+        "accept_dns": bool(s.get("tailscale_accept_dns", True)),
+        "exit_node": s.get("tailscale_exit_node") or "",
+    }
+
+
 def get_status() -> dict[str, Any]:
     """Read `tailscale status --json` and project the bits the UI cares
     about. Returns a stable shape regardless of daemon state — the UI
@@ -126,6 +158,10 @@ def get_status() -> dict[str, Any]:
         "magic_dns_suffix": s.get("MagicDNSSuffix") or "",
         "tailnet_url": https_url,
         "peers_count": len(s.get("Peer") or {}),
+        # Persisted power-user flags (#96 phase 2). UI pre-populates the
+        # advanced accordion from these and sends edits back via the
+        # standard /api/settings POST.
+        "config": _load_persisted_opts(),
     }
 
 
@@ -295,7 +331,19 @@ def start_up(opts: dict) -> dict[str, Any]:
             "error": "",
         })
 
-    argv = _build_up_argv(opts or {})
+    # Merge persisted power-user settings (#96 phase 2) with body opts —
+    # body wins per-key, so the user can override at Connect time without
+    # touching saved settings. None / empty body keys fall through to the
+    # persisted value.
+    merged = dict(_load_persisted_opts())
+    for k, v in (opts or {}).items():
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        merged[k] = v
+
+    argv = _build_up_argv(merged)
     auth_key = (opts.get("auth_key") or "").strip()
     env = None
     if auth_key:
