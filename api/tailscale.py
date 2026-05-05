@@ -740,14 +740,23 @@ def logout() -> dict[str, Any]:
 
 
 def configure_serve() -> dict[str, Any]:
-    """POST /api/tailscale/serve — re-run `tailscale serve --bg / http://localhost:8787`.
+    """POST /api/tailscale/serve — bind tailnet HTTPS to localhost:8787.
 
-    Idempotent. Useful when entrypoint.sh's auto-config polled too early
-    and gave up, or when the user wants to re-enable Serve after a logout.
+    QA fix v0.4.7-WaveH: previous syntax `tailscale serve --bg / http://localhost:8787`
+    was the legacy positional-URL form. Tailscale 1.60+ removed it; on 1.96.4
+    the call returned `Error: invalid argument format`. The modern syntax is
+    just `tailscale serve [--bg] <port>` per `tailscale serve --help`. This
+    means BOTH the v0.4.7 auto-Serve-after-Running path AND the
+    entrypoint.sh boot-time auto-config have been silently failing on any
+    container built since the legacy syntax was removed — verified during
+    v0.4.7 QA Phase 0 against a real tailnet (1.96.4). Idempotent.
+
+    Note: this requires HTTPS to be enabled on the user's tailnet (admin
+    console → DNS → "Enable HTTPS"). Without that, even the correct syntax
+    returns 'Serve is not enabled on your tailnet' with a hint URL — that's
+    a per-tailnet config, not a code bug.
     """
-    rc, _out, err = _run_tailscale(
-        ["serve", "--bg", "/", "http://localhost:8787"], timeout=15.0,
-    )
+    rc, _out, err = _run_tailscale(["serve", "--bg", "8787"], timeout=15.0)
     if rc != 0:
         return {"ok": False, "error": err.strip() or f"tailscale serve exited {rc}"}
     return {"ok": True}
