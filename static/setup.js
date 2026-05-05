@@ -177,7 +177,7 @@ function renderStep3() {
         <li>Local: <code>http://localhost:8787</code></li>
       </ul>
       <div class="btn-actions">
-        <button id="open-fox" class="btn btn-primary" onclick="completSetup()">Open Fox</button>
+        <button id="open-fox" class="btn btn-primary" onclick="completeSetup()">Open Fox</button>
       </div>
     </div>
   `;
@@ -347,9 +347,17 @@ function _renderLocalFallbackProgress(snapshot) {
       showBar = false;
   }
 
-  const bar = showBar
-    ? `<div class="dl-bar"><div class="dl-bar-fill" style="width:${pct}%"></div></div>`
-    : '';
+  // QA fix: when bytes_total is unknown, the bar previously rendered
+  // as a 0%-fill and looked frozen. Use an indeterminate animated
+  // stripe instead so the user knows progress is happening.
+  let bar = '';
+  if (showBar) {
+    if (total > 0) {
+      bar = `<div class="dl-bar"><div class="dl-bar-fill" style="width:${pct}%"></div></div>`;
+    } else {
+      bar = `<div class="dl-bar dl-bar-indeterminate"><div class="dl-bar-fill"></div></div>`;
+    }
+  }
 
   container.innerHTML = `
     <div class="step">
@@ -409,7 +417,7 @@ async function useLlamaCppFallback() {
 
 // ── Complete setup ───────────────────────────────────────────────────────────
 
-async function completSetup() {
+async function completeSetup() {
   const btn = document.getElementById('open-fox');
   if (btn) {
     btn.disabled = true;

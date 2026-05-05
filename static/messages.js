@@ -989,10 +989,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isModelNotFound=d.type==='model_not_found';
           const isNoResponse=d.type==='no_response';
           const isStreamInterrupted=d.type==='stream_interrupted'; // mid-stream provider drop (#89)
-          // FITB: dispatch a tagged event so the local-fallback polish module
-          // (fallback-polish.js, #9 polish) can react to remote failures
-          // without monkey-patching this handler. Surgical one-line hook.
-          try{ window.dispatchEvent(new CustomEvent('fitb:stream-error',{detail:{type:d.type||'unknown',message:d.message||''}})); }catch(_){}
+          // (FITB stream-error dispatch happens below — see end of catch block)
           const label=isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response received':isStreamInterrupted?'Stream interrupted':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`});
@@ -1006,6 +1003,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         try{const d=JSON.parse(e.data);trackBackgroundError(activeSid,_errTitle,d.message||'Error');}
         catch(_){trackBackgroundError(activeSid,_errTitle,'Error');}
       }
+      // FITB: always dispatch fitb:stream-error for the polish module
+      // (fallback-polish.js, #9 polish), regardless of whether e.data
+      // parses as JSON. Previously this dispatch was nested inside the
+      // JSON.parse try-block above — a malformed apperror payload (e.g.
+      // truncated stream) skipped the dispatch and the reactive modal
+      // missed the most "transient" failures.
+      try{
+        let _detail = {type:'unknown', message:''};
+        try{ const _d = JSON.parse(e.data); _detail = {type: _d.type||'unknown', message: _d.message||''}; }catch(_){}
+        window.dispatchEvent(new CustomEvent('fitb:stream-error', {detail: _detail}));
+      }catch(_){}
       if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
       renderSessionList(); // clear streaming indicator immediately on apperror
     });
