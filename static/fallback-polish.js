@@ -94,11 +94,21 @@
     const dismiss = wrap.querySelector('#fitbFbModalDismiss');
     const status = wrap.querySelector('#fitbFbModalStatus');
 
+    // QA fix v0.4.7-WaveF: removeEventListener inside closeAndDismiss too,
+    // not just inside the Escape handler. Otherwise Dismiss/Enable paths
+    // leave a `keydown` listener attached with a closed-over `wrap` node
+    // for the rest of the session.
     const closeAndDismiss = (markSeen) => {
       _modalOpen = false;
       if (markSeen) sessionStorage.setItem(MODAL_DISMISSED, '1');
+      document.removeEventListener('keydown', onKey);
       closeNode(wrap);
     };
+
+    const onKey = (e) => {
+      if (e.key === 'Escape') closeAndDismiss(true);
+    };
+    document.addEventListener('keydown', onKey);
 
     dismiss.addEventListener('click', () => closeAndDismiss(true));
     enable.addEventListener('click', async () => {
@@ -123,14 +133,6 @@
       // the next page load to start it. For this session, that's fine.
       setTimeout(() => closeAndDismiss(true), 1500);
     });
-    // Escape closes (treat as dismiss).
-    const onKey = (e) => {
-      if (e.key === 'Escape') {
-        document.removeEventListener('keydown', onKey);
-        closeAndDismiss(true);
-      }
-    };
-    document.addEventListener('keydown', onKey);
   }
 
   async function maybeReactToError(detail) {

@@ -452,6 +452,12 @@ def _probe_one(url: str, timeout: float = 5.0) -> tuple[bool, str]:
         return False, str(exc)
 
 
+# QA fix v0.4.7-WaveF: protect the cross-thread cache with a lock so
+# concurrent probes (multiple browser tabs, recovery banner + Settings
+# panel) observe a consistent snapshot.
+_remote_health_lock = threading.Lock()
+
+
 def get_remote_health() -> dict[str, Any]:
     """Lightweight reachability probe used by the recovery banner (#9
     polish). Returns ``{remote_healthy, tested_url, error}``.
@@ -466,8 +472,9 @@ def get_remote_health() -> dict[str, Any]:
     cache so multi-tab polling doesn't multiply requests.
     """
     now = time.time()
-    cache = _remote_health_cache
-    if cache and (now - cache["at"]) < 30.0:
+    with _remote_health_lock:
+        cache = dict(_remote_health_cache)
+    if cache and (now - cache.get("at", 0)) < 30.0 and "result" in cache:
         return cache["result"]
 
     last_err = ""
@@ -480,7 +487,8 @@ def get_remote_health() -> dict[str, Any]:
                 "tested_provider": label,
                 "error": "",
             }
-            _remote_health_cache.update(at=now, result=result)
+            with _remote_health_lock:
+                _remote_health_cache.update(at=now, result=result)
             return result
         last_err = err
 
@@ -490,7 +498,8 @@ def get_remote_health() -> dict[str, Any]:
         "tested_provider": "",
         "error": last_err or "all probes failed",
     }
-    _remote_health_cache.update(at=now, result=result)
+    with _remote_health_lock:
+        _remote_health_cache.update(at=now, result=result)
     return result
 
 

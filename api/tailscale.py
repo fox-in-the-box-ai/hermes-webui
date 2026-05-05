@@ -106,7 +106,9 @@ _TS_TAG_RE = __import__("re").compile(r"^tag:[a-z][a-z0-9-]*$")
 _TS_ROUTE_RE = __import__("re").compile(
     r"^(?:\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}|[0-9a-fA-F:]+/\d{1,3})$"
 )
-_TS_HOST_RE = __import__("re").compile(r"^[a-zA-Z0-9.\-_:/]+$")
+# Hostname / IP charset for --exit-node. Drop `/` (was a copy-paste from
+# the URL regex; exit-node values never contain `/`).
+_TS_HOST_RE = __import__("re").compile(r"^[a-zA-Z0-9.\-_:]+$")
 _TS_URL_RE = __import__("re").compile(r"^https?://[a-zA-Z0-9.\-_:/]+(?:/[a-zA-Z0-9.\-_:/?&=%~]*)?$")
 
 
@@ -487,15 +489,19 @@ def _up_subprocess(argv: list[str], env: dict | None, attempt_id: int) -> None:
         st = get_status()
         if st.get("backend_state") == "Running":
             _set_up_state(attempt_id, state="running", ended_at=time.time())
-            # QA fix: auto-configure Tailscale Serve once the tunnel is
-            # up. entrypoint.sh's auto-config only runs at container
-            # boot — after a reconnect (post-logout, or a daemon restart)
-            # the Serve binding would otherwise be missing until the user
-            # manually pokes /api/tailscale/serve.
-            try:
-                configure_serve()
-            except Exception:
-                logger.debug("Auto-configure Serve after Running failed", exc_info=True)
+            # QA fix v0.4.7-WaveF: gate the Serve auto-config on still-
+            # being-the-active-attempt at call time. If logout() ran
+            # between the rc=0 check and this point, attempt_id has
+            # been bumped and we'd otherwise re-establish a Serve
+            # binding against a tunnel the user just disconnected.
+            with _up_lock:
+                still_current = (_up_state.get("attempt_id") == attempt_id and
+                                 _up_state.get("state") == "running")
+            if still_current:
+                try:
+                    configure_serve()
+                except Exception:
+                    logger.debug("Auto-configure Serve after Running failed", exc_info=True)
         else:
             # Edge case: rc=0 but daemon not Running (e.g. login-only mode).
             # Treat as failed so UI re-prompts.
@@ -613,7 +619,13 @@ def get_up_progress() -> dict[str, Any]:
     if snap["state"] in ("starting", "awaiting-auth"):
         st = get_status()
         if st.get("backend_state") == "Running":
-            _set_up_state(state="running", ended_at=time.time())
+            # QA fix v0.4.7-WaveF: pass the snapshot's attempt_id into
+            # _set_up_state so a stale poll cannot stomp a concurrent
+            # logout()'s reset-to-idle. Without the attempt_id, the
+            # guard inside _set_up_state would fall through and write
+            # state="running" over freshly-cleared idle, bringing back
+            # the "Connected" badge after the user explicitly disconnected.
+            _set_up_state(snap.get("attempt_id"), state="running", ended_at=time.time())
             with _up_lock:
                 snap = dict(_up_state)
     return {
@@ -663,10 +675,11 @@ def logout() -> dict[str, Any]:
         })
 
     # Reset Tailscale Serve config best-effort. `tailscale serve reset`
-    # exists on recent Tailscale builds; older builds use `--remove`.
-    # Either failure mode is acceptable — the worst case is a stale
-    # Serve binding that auto-reattaches on next Running tunnel.
-    for args in (["serve", "reset"], ["serve", "--remove", "/"]):
+    # exists on recent builds; older builds use `tailscale serve / off`
+    # (NOT `--remove` — that's never been a valid flag). Worst case:
+    # neither succeeds and a stale Serve binding auto-reattaches on
+    # next Running tunnel via `configure_serve()`'s post-Running call.
+    for args in (["serve", "reset"], ["serve", "/", "off"]):
         rc, _o, _e = _run_tailscale(args, timeout=5.0)
         if rc == 0:
             break
