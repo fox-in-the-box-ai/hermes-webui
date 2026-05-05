@@ -3172,6 +3172,7 @@ async function loadSettingsPanel(){
     }catch(e){}
     _syncHermesPanelSessionActions();
     loadProvidersPanel(); // load provider cards in background
+    loadTailscaleConnection(); // tailscale connection state (issue #96) — best-effort
     loadHostnameSettings(); // tailscale hostname (issue #44) — best-effort
     loadOllamaLocal(); // local Ollama detection (issue #66) — best-effort
     loadLocalModels(); // local model download manager (issue #10) — best-effort
@@ -3250,6 +3251,181 @@ async function saveHostname(){
   }catch(e){
     if(status) status.textContent = 'Network error.';
   }
+}
+
+// ── Tailscale connection (issue #96, phase 1) ───────────────────────────────
+
+let _tsPollTimer = null;
+const _TS_POLL_MS = 2000;
+
+function _tsRender(state){
+  // Render the badge + URL + button visibility for the current snapshot.
+  const badge = document.getElementById('tsBadge');
+  const urlEl = document.getElementById('tsTailnetUrl');
+  const connectBtn = document.getElementById('tsConnectBtn');
+  const disconnectBtn = document.getElementById('tsDisconnectBtn');
+  if(!badge) return;
+
+  const bs = (state && state.backend_state) || 'Unknown';
+  // Map backend states to UI labels.
+  const ui = bs === 'Running' ? 'connected'
+           : bs === 'Starting' ? 'connecting'
+           : bs === 'NeedsLogin' || bs === 'NeedsMachineAuth' ? 'needs-login'
+           : bs === 'Stopped' ? 'disconnected'
+           : bs === 'NoState' ? 'disconnected'
+           : 'unknown';
+  badge.className = 'ts-badge ts-badge-' + ui;
+  badge.textContent = ui === 'connected' ? 'Connected'
+                    : ui === 'connecting' ? 'Connecting…'
+                    : ui === 'needs-login' ? 'Needs login'
+                    : ui === 'disconnected' ? 'Disconnected'
+                    : 'Unknown';
+
+  if(urlEl){
+    if(ui === 'connected' && state.tailnet_url){
+      urlEl.textContent = state.tailnet_url;
+      urlEl.title = state.tailnet_url;
+    }else{
+      urlEl.textContent = '';
+    }
+  }
+  if(connectBtn) connectBtn.style.display = ui === 'connected' ? 'none' : '';
+  if(disconnectBtn) disconnectBtn.style.display = ui === 'connected' ? '' : 'none';
+}
+
+function _tsMessage(msg){
+  const el = document.getElementById('tsMessage');
+  if(el) el.textContent = msg || '';
+}
+
+async function loadTailscaleConnection(){
+  // Best-effort: if the endpoint 404s (older webui), the tile silently
+  // renders "Unknown" and stays inert. Catch-all to keep Settings load
+  // resilient.
+  try{
+    const state = await api('/api/tailscale/status');
+    _tsRender(state);
+    if(state && !state.available){
+      _tsMessage('Tailscale CLI not available (running outside container?).');
+    }
+  }catch(e){
+    _tsRender({ backend_state: 'Unknown' });
+  }
+}
+
+async function tsConnect(){
+  const connectBtn = document.getElementById('tsConnectBtn');
+  const authKeyEl = document.getElementById('tsAuthKey');
+  const auth_key = (authKeyEl && authKeyEl.value || '').trim();
+  if(connectBtn) connectBtn.disabled = true;
+  _tsMessage(auth_key ? 'Authenticating with key…' : 'Starting Tailscale…');
+
+  let r;
+  try{
+    r = await fetch('/api/tailscale/up', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(auth_key ? { auth_key } : {}),
+    });
+  }catch(e){
+    _tsMessage('Network error starting Tailscale.');
+    if(connectBtn) connectBtn.disabled = false;
+    return;
+  }
+  const data = await r.json().catch(() => ({}));
+  if(!data.ok){
+    _tsMessage(data.error || 'Failed to start Tailscale.');
+    if(connectBtn) connectBtn.disabled = false;
+    return;
+  }
+
+  // Auth-key path: no browser, just poll until Running.
+  if(data.auth_key_used){
+    _tsStartPolling();
+    return;
+  }
+
+  // Interactive path: poll, and when an auth_url surfaces, open it in a
+  // new tab and tell the user to complete auth there.
+  _tsStartPolling();
+}
+
+async function tsDisconnect(){
+  if(!confirm('Disconnect this Fox from your tailnet?')) return;
+  const disconnectBtn = document.getElementById('tsDisconnectBtn');
+  if(disconnectBtn) disconnectBtn.disabled = true;
+  _tsMessage('Disconnecting…');
+  try{
+    const r = await fetch('/api/tailscale/logout', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({}),
+    });
+    const data = await r.json().catch(() => ({}));
+    if(!data.ok){
+      _tsMessage(data.error || 'Failed to disconnect.');
+    }else{
+      _tsMessage('Disconnected.');
+    }
+  }catch(e){
+    _tsMessage('Network error during disconnect.');
+  }finally{
+    if(disconnectBtn) disconnectBtn.disabled = false;
+    loadTailscaleConnection();
+  }
+}
+
+function _tsStopPolling(){
+  if(_tsPollTimer){ clearTimeout(_tsPollTimer); _tsPollTimer = null; }
+}
+
+let _tsAuthUrlOpened = false;
+
+function _tsStartPolling(){
+  _tsStopPolling();
+  _tsAuthUrlOpened = false;
+
+  const tick = async () => {
+    let progress;
+    try{
+      progress = await api('/api/tailscale/up/poll');
+    }catch(e){
+      _tsPollTimer = setTimeout(tick, _TS_POLL_MS * 2);
+      return;
+    }
+
+    // First time we see an auth URL, open it in a new tab. Subsequent ticks
+    // don't re-open — that would spam tabs every 2s.
+    if(!_tsAuthUrlOpened && progress.auth_url){
+      _tsAuthUrlOpened = true;
+      _tsMessage('Opening browser to complete Tailscale auth…');
+      try{ window.open(progress.auth_url, '_blank', 'noopener'); }catch(e){}
+    }
+
+    if(progress.state === 'awaiting-auth'){
+      _tsMessage('Waiting for you to finish auth in the browser tab…');
+    }else if(progress.state === 'starting'){
+      _tsMessage('Starting Tailscale…');
+    }
+
+    if(progress.state === 'running'){
+      _tsMessage('Connected.');
+      const connectBtn = document.getElementById('tsConnectBtn');
+      if(connectBtn) connectBtn.disabled = false;
+      _tsStopPolling();
+      loadTailscaleConnection();
+      return;
+    }
+    if(progress.state === 'failed'){
+      _tsMessage(progress.error || 'Tailscale connection failed.');
+      const connectBtn = document.getElementById('tsConnectBtn');
+      if(connectBtn) connectBtn.disabled = false;
+      _tsStopPolling();
+      return;
+    }
+    _tsPollTimer = setTimeout(tick, _TS_POLL_MS);
+  };
+  _tsPollTimer = setTimeout(tick, 800);  // first tick fast so the URL surfaces
 }
 
 // ── Local Ollama (issues #66, #67) ──────────────────────────────────────────
