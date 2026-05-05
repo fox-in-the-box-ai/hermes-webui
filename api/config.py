@@ -2321,6 +2321,10 @@ _SETTINGS_DEFAULTS = {
     # silently retry through the local model. Default OFF; user enables
     # explicitly in Settings → Providers → Local fallback.
     "local_fallback_enabled": False,
+    # FITB: tracks whether the post-wizard hostname prompt (#68) has been
+    # shown. Once true, the prompt never re-fires — set on Save or Skip in
+    # the modal, or implicitly when the user sets a hostname in Settings.
+    "hostname_prompted": False,
 }
 _SETTINGS_LEGACY_DROP_KEYS = {"assistant_language", "bubble_layout", "default_model"}
 _SETTINGS_THEME_VALUES = {"light", "dark", "system"}
@@ -2436,6 +2440,7 @@ _SETTINGS_BOOL_KEYS = {
     "simplified_tool_calling",
     "api_redact_enabled",
     "local_fallback_enabled",
+    "hostname_prompted",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")

@@ -132,12 +132,33 @@ def get_hostname_state() -> dict[str, Any]:
     """Read everything the Settings UI needs to render the hostname field."""
     configured = _read_configured_hostname()
     effective = _read_effective_hostname()
+    # `prompted` is the post-wizard one-time-prompt flag (#68). The chat-UI
+    # reads it on first load to decide whether to show the hostname modal;
+    # Settings ignores it.
+    try:
+        from api.config import load_settings
+        prompted = bool(load_settings().get("hostname_prompted", False))
+    except Exception:
+        prompted = False
     return {
         "configured": configured,
         "effective": effective or "",
         "default_suggestion": default_hostname() if not configured else "",
         "tailscale_running": effective is not None,
+        "prompted": prompted,
     }
+
+
+def mark_hostname_prompted() -> dict[str, Any]:
+    """Persist hostname_prompted=true so the post-wizard modal never re-fires.
+    Used by both the explicit "Skip" button and implicitly when the modal saves."""
+    try:
+        from api.config import save_settings
+        save_settings({"hostname_prompted": True})
+        return {"ok": True}
+    except Exception as exc:
+        logger.exception("Failed to mark hostname_prompted")
+        return {"ok": False, "error": str(exc)}
 
 
 def apply_hostname(hostname: str) -> dict[str, Any]:
@@ -215,4 +236,20 @@ def handle_set_hostname(handler, body: dict) -> dict[str, Any]:
     raw = body.get("hostname", "")
     if not isinstance(raw, str):
         return {"ok": False, "error": "hostname must be a string"}
-    return apply_hostname(raw)
+    result = apply_hostname(raw)
+    # Setting a hostname (whether from the wizard modal or Settings) implicitly
+    # answers the post-wizard prompt — never re-fire it. Best-effort; failure
+    # to set the flag must not fail the hostname save itself.
+    if result.get("ok"):
+        try:
+            mark_hostname_prompted()
+        except Exception:
+            logger.exception("Failed to set hostname_prompted after save")
+    return result
+
+
+def handle_dismiss_hostname_prompt(handler, body: dict) -> dict[str, Any]:
+    """POST /api/settings/hostname/dismiss-prompt — Skip button on the
+    post-wizard modal. Marks prompted=true without setting any hostname,
+    so Tailscale auto-naming continues to apply."""
+    return mark_hostname_prompted()

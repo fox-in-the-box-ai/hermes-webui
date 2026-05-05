@@ -2363,6 +2363,12 @@ def handle_post(handler, parsed) -> bool:
         result = handle_set_hostname(handler, body)
         return j(handler, result, status=200 if result.get("ok") else 400)
 
+    # ── Post-wizard hostname-prompt dismiss — issue #68 ──
+    if parsed.path == "/api/settings/hostname/dismiss-prompt":
+        from api.hostname import handle_dismiss_hostname_prompt
+        result = handle_dismiss_hostname_prompt(handler, body)
+        return j(handler, result, status=200 if result.get("ok") else 400)
+
     # ── Local Ollama (POST) — issues #66, #67 ──
     if parsed.path == "/api/ollama/refresh":
         from api.ollama import handle_post_refresh

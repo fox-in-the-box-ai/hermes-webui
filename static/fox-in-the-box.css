@@ -773,3 +773,112 @@ pre[class*=language-] {
 .fox-in-the-box .fitb-settings-bot-name {
   display: none !important;
 }
+
+/* ── Post-wizard hostname prompt (issue #68) ──────────────────────────── */
+
+.fitb-hostname-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.fitb-hostname-modal {
+  background: var(--bg-secondary, #1f2024);
+  color: var(--text-primary, #f0f0f2);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 24px 24px 20px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.fitb-hostname-modal h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.fitb-hostname-modal p {
+  margin: 0 0 14px;
+  font-size: 13px;
+  opacity: 0.8;
+  line-height: 1.5;
+}
+
+.fitb-hostname-modal label {
+  display: block;
+  font-size: 12px;
+  margin-bottom: 6px;
+  opacity: 0.7;
+}
+
+.fitb-hostname-modal input[type="text"] {
+  width: 100%;
+  padding: 9px 11px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.25);
+  color: inherit;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
+.fitb-hostname-modal input[type="text"]:focus {
+  outline: none;
+  border-color: #2dd4bf;
+}
+
+.fitb-hostname-status {
+  font-size: 12px;
+  min-height: 16px;
+  margin: 8px 0 4px;
+  opacity: 0.8;
+}
+
+.fitb-hostname-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.fitb-btn {
+  border: 0;
+  padding: 8px 14px;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.fitb-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.fitb-btn-primary {
+  background: #2dd4bf;
+  color: #0a0a0a;
+  font-weight: 600;
+}
+
+.fitb-btn-primary:hover:not(:disabled) {
+  background: #5eead4;
+}
+
+.fitb-btn-link {
+  background: transparent;
+  color: inherit;
+  opacity: 0.7;
+}
+
+.fitb-btn-link:hover:not(:disabled) {
+  opacity: 1;
+}
