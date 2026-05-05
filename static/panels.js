@@ -3173,6 +3173,7 @@ async function loadSettingsPanel(){
     _syncHermesPanelSessionActions();
     loadProvidersPanel(); // load provider cards in background
     loadHostnameSettings(); // tailscale hostname (issue #44) — best-effort
+    loadOllamaLocal(); // local Ollama detection (issue #66) — best-effort
     switchSettingsSection(_settingsSection);
   }catch(e){
     showToast(t('settings_load_failed')+e.message);
@@ -3246,6 +3247,109 @@ async function saveHostname(){
     showToast('Hostname saved');
   }catch(e){
     if(status) status.textContent = 'Network error.';
+  }
+}
+
+// ── Local Ollama (issue #66) ────────────────────────────────────────────────
+
+function _formatBytes(n){
+  if(!n || n <= 0) return '';
+  const units = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while(n >= 1024 && i < units.length-1){ n /= 1024; i++; }
+  return (n < 10 ? n.toFixed(1) : Math.round(n)) + ' ' + units[i];
+}
+
+async function loadOllamaLocal(){
+  const dot = document.getElementById('ollamaLocalDot');
+  const statusEl = document.getElementById('ollamaLocalStatus');
+  const modelsEl = document.getElementById('ollamaLocalModels');
+  const emptyEl = document.getElementById('ollamaLocalEmpty');
+  const notFoundEl = document.getElementById('ollamaLocalNotFound');
+  if(!dot || !statusEl) return;
+
+  // Reset visibility
+  if(modelsEl) modelsEl.style.display = 'none';
+  if(emptyEl) emptyEl.style.display = 'none';
+  if(notFoundEl) notFoundEl.style.display = 'none';
+
+  try{
+    const s = await api('/api/ollama/status');
+    if(!s.running){
+      dot.style.background = 'var(--muted)';
+      statusEl.textContent = 'Not detected on this host.';
+      if(notFoundEl) notFoundEl.style.display = 'block';
+      return;
+    }
+    dot.style.background = 'var(--success, #2ec27e)';
+    statusEl.textContent = 'Running on ' + (s.host || 'host') + (s.version ? ' · v' + s.version : '');
+    // Fetch models
+    const ms = await api('/api/ollama/models');
+    if(!ms.running || !Array.isArray(ms.models)){
+      if(emptyEl) emptyEl.style.display = 'block';
+      return;
+    }
+    if(ms.models.length === 0){
+      if(emptyEl) emptyEl.style.display = 'block';
+      return;
+    }
+    if(modelsEl){
+      modelsEl.innerHTML = '';
+      modelsEl.style.display = 'flex';
+      modelsEl.style.flexDirection = 'column';
+      modelsEl.style.gap = '6px';
+      for(const m of ms.models){
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px;border:1px solid var(--border2);border-radius:6px;background:var(--bg)';
+        const left = document.createElement('div');
+        left.innerHTML = '<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">' + (m.name || '?') + '</div>'
+          + '<div style="font-size:10px;color:var(--muted);margin-top:2px">'
+          + [m.parameter_size, m.quantization, _formatBytes(m.size_bytes)].filter(Boolean).join(' · ')
+          + '</div>';
+        const btn = document.createElement('button');
+        btn.className = 'btn-tiny';
+        btn.textContent = 'Use';
+        btn.onclick = () => useOllamaModel(m.name);
+        row.appendChild(left);
+        row.appendChild(btn);
+        modelsEl.appendChild(row);
+      }
+    }
+  }catch(e){
+    dot.style.background = 'var(--muted)';
+    statusEl.textContent = 'Detection failed.';
+  }
+}
+
+async function refreshOllamaLocal(){
+  const statusEl = document.getElementById('ollamaLocalStatus');
+  if(statusEl) statusEl.textContent = 'Re-probing…';
+  try{
+    await fetch('/api/ollama/refresh', {method: 'POST'});
+  }catch(e){}
+  loadOllamaLocal();
+}
+
+async function useOllamaModel(name){
+  if(!name) return;
+  try{
+    const r = await fetch('/api/ollama/use-model', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({model: name}),
+    });
+    const result = await r.json();
+    if(!result.ok){
+      showToast(result.error || 'Failed to switch model');
+      return;
+    }
+    showToast('Now chatting with ' + name);
+    // Refresh model dropdown so the chat input reflects the change.
+    if(typeof populateModelDropdown === 'function'){
+      try{ populateModelDropdown(); }catch(e){}
+    }
+  }catch(e){
+    showToast('Network error');
   }
 }
 

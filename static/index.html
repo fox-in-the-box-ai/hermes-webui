@@ -902,6 +902,23 @@
             <div id="providersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="providers_empty">
               No configurable providers found.
             </div>
+            <!-- Local Ollama tile — issue #66 -->
+            <div id="ollamaLocalCard" style="margin-top:14px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--code-bg)">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+                <div>
+                  <div style="font-weight:600;font-size:13px">Local Ollama <span id="ollamaLocalDot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-left:6px;vertical-align:middle"></span></div>
+                  <div id="ollamaLocalStatus" style="font-size:11px;color:var(--muted);margin-top:3px">Checking…</div>
+                </div>
+                <button class="btn-tiny" onclick="refreshOllamaLocal()" title="Re-probe local Ollama" data-i18n-title="ollama_refresh">Refresh</button>
+              </div>
+              <div id="ollamaLocalModels" style="margin-top:10px;display:none"></div>
+              <div id="ollamaLocalEmpty" style="margin-top:10px;display:none;font-size:12px;color:var(--muted)">
+                No models installed yet. Run <code>ollama pull llama3.1:8b</code> on your computer (or another model name from <a href="https://ollama.com/library" target="_blank" rel="noopener">ollama.com/library</a>), then click Refresh.
+              </div>
+              <div id="ollamaLocalNotFound" style="margin-top:10px;display:none;font-size:12px;color:var(--muted)">
+                Not detected — <a href="https://ollama.com/download" target="_blank" rel="noopener">install Ollama</a> on your computer, then click Refresh. On Linux, the container needs <code>--add-host=host.docker.internal:host-gateway</code> (added by default in Fox v0.3.0+; older installs need to be re-created).
+              </div>
+            </div>
           </div>
           <div class="settings-pane" id="settingsPaneSystem">
             <div class="settings-section-head">

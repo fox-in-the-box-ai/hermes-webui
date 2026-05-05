@@ -1648,6 +1648,15 @@ def handle_get(handler, parsed) -> bool:
         from api.hostname import handle_get_hostname
         return j(handler, handle_get_hostname(handler))
 
+    # ── Local Ollama (GET) — issue #66 ──
+    if parsed.path == "/api/ollama/status":
+        from api.ollama import handle_get_status
+        return j(handler, handle_get_status(handler))
+
+    if parsed.path == "/api/ollama/models":
+        from api.ollama import handle_get_models
+        return j(handler, handle_get_models(handler))
+
     if parsed.path == "/api/models":
         return j(handler, get_available_models())
 
@@ -2326,6 +2335,16 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/settings/hostname":
         from api.hostname import handle_set_hostname
         result = handle_set_hostname(handler, body)
+        return j(handler, result, status=200 if result.get("ok") else 400)
+
+    # ── Local Ollama (POST) — issue #66 ──
+    if parsed.path == "/api/ollama/refresh":
+        from api.ollama import handle_post_refresh
+        return j(handler, handle_post_refresh(handler))
+
+    if parsed.path == "/api/ollama/use-model":
+        from api.ollama import handle_post_use_model
+        result = handle_post_use_model(handler, body)
         return j(handler, result, status=200 if result.get("ok") else 400)
 
     if parsed.path == "/api/session/new":
