@@ -3305,11 +3305,58 @@ async function loadTailscaleConnection(){
   try{
     const state = await api('/api/tailscale/status');
     _tsRender(state);
+    if(state && state.config){
+      _tsPopulateAdvanced(state.config);
+    }
     if(state && !state.available){
       _tsMessage('Tailscale CLI not available (running outside container?).');
     }
   }catch(e){
     _tsRender({ backend_state: 'Unknown' });
+  }
+}
+
+// Pre-populate the advanced accordion fields from persisted settings
+// (#96 phase 2). Called after status loads.
+function _tsPopulateAdvanced(cfg){
+  const set = (id, v) => { const el = document.getElementById(id); if(el && el.value !== v) el.value = v; };
+  const setCheck = (id, v) => { const el = document.getElementById(id); if(el) el.checked = !!v; };
+  set('tsLoginServer', cfg.login_server || '');
+  set('tsAdvertiseRoutes', cfg.advertise_routes || '');
+  set('tsAdvertiseTags', cfg.advertise_tags || '');
+  set('tsExitNode', cfg.exit_node || '');
+  setCheck('tsAcceptRoutes', cfg.accept_routes);
+  // accept_dns defaults true; explicit false-checking respects user toggle
+  setCheck('tsAcceptDns', cfg.accept_dns !== false);
+}
+
+async function tsSaveAdvanced(){
+  const status = document.getElementById('tsAdvancedStatus');
+  const get = (id) => (document.getElementById(id) || { value: '' }).value.trim();
+  const checked = (id) => !!(document.getElementById(id) || {}).checked;
+  const payload = {
+    tailscale_login_server: get('tsLoginServer'),
+    tailscale_advertise_routes: get('tsAdvertiseRoutes'),
+    tailscale_advertise_tags: get('tsAdvertiseTags'),
+    tailscale_exit_node: get('tsExitNode'),
+    tailscale_accept_routes: checked('tsAcceptRoutes'),
+    tailscale_accept_dns: checked('tsAcceptDns'),
+  };
+  if(status) status.textContent = 'Saving…';
+  try{
+    const r = await fetch('/api/settings', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    });
+    if(!r.ok){
+      if(status) status.textContent = 'Save failed (HTTP ' + r.status + ').';
+      return;
+    }
+    if(status) status.textContent = 'Saved. Will apply on next Connect.';
+    showToast('Advanced Tailscale settings saved');
+  }catch(e){
+    if(status) status.textContent = 'Network error.';
   }
 }
 
