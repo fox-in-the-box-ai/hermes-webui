@@ -1678,6 +1678,19 @@ def handle_get(handler, parsed) -> bool:
         from api.local_fallback import handle_get_status
         return j(handler, handle_get_status(handler))
 
+    # ── Tailscale (GET) — issue #96 ──
+    if parsed.path == "/api/tailscale/status":
+        from api.tailscale import handle_get_status as handle_ts_get_status
+        return j(handler, handle_ts_get_status(handler))
+
+    if parsed.path == "/api/tailscale/up/poll":
+        from api.tailscale import handle_get_up_poll
+        return j(handler, handle_get_up_poll(handler))
+
+    if parsed.path == "/api/tailscale/serve":
+        from api.tailscale import handle_get_serve
+        return j(handler, handle_get_serve(handler))
+
     if parsed.path == "/api/models":
         return j(handler, get_available_models())
 
@@ -2404,6 +2417,22 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/local-fallback/disable":
         from api.local_fallback import handle_post_disable
         return j(handler, handle_post_disable(handler, body))
+
+    # ── Tailscale (POST) — issue #96 ──
+    if parsed.path == "/api/tailscale/up":
+        from api.tailscale import handle_post_up
+        result = handle_post_up(handler, body)
+        return j(handler, result, status=200 if result.get("ok") else 400)
+
+    if parsed.path == "/api/tailscale/logout":
+        from api.tailscale import handle_post_logout
+        result = handle_post_logout(handler, body)
+        return j(handler, result, status=200 if result.get("ok") else 400)
+
+    if parsed.path == "/api/tailscale/serve":
+        from api.tailscale import handle_post_serve
+        result = handle_post_serve(handler, body)
+        return j(handler, result, status=200 if result.get("ok") else 400)
 
     # ── Local model download manager (POST) — issue #10 ──
     # Path-param routing via prefix match because hermes-webui dispatches
