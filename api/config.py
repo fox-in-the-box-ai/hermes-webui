@@ -2315,6 +2315,12 @@ _SETTINGS_DEFAULTS = {
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
     "busy_input_mode": "queue",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
+    # FITB: opt-in flag for local AI fallback (#9). Toggling ON triggers a
+    # one-time GGUF download (~2.5 GB) and starts a supervisord-managed
+    # llama-server. When ON and ready, transient remote-provider failures
+    # silently retry through the local model. Default OFF; user enables
+    # explicitly in Settings → Providers → Local fallback.
+    "local_fallback_enabled": False,
 }
 _SETTINGS_LEGACY_DROP_KEYS = {"assistant_language", "bubble_layout", "default_model"}
 _SETTINGS_THEME_VALUES = {"light", "dark", "system"}
@@ -2429,6 +2435,7 @@ _SETTINGS_BOOL_KEYS = {
     "show_thinking",
     "simplified_tool_calling",
     "api_redact_enabled",
+    "local_fallback_enabled",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")

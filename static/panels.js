@@ -3175,6 +3175,7 @@ async function loadSettingsPanel(){
     loadHostnameSettings(); // tailscale hostname (issue #44) — best-effort
     loadOllamaLocal(); // local Ollama detection (issue #66) — best-effort
     loadLocalModels(); // local model download manager (issue #10) — best-effort
+    loadLocalFallback(); // local fallback runtime (issue #9) — best-effort
     switchSettingsSection(_settingsSection);
   }catch(e){
     showToast(t('settings_load_failed')+e.message);
@@ -3421,6 +3422,90 @@ async function refreshOllamaLocal(){
     await fetch('/api/ollama/refresh', {method: 'POST'});
   }catch(e){}
   loadOllamaLocal();
+}
+
+// ── Local fallback runtime (issue #9) ──────────────────────────────────────
+
+// Polls the fallback status while the user is on the Settings page so the
+// "Downloading X% / Starting / Ready" transitions show without a manual
+// refresh. Lightweight — one GET per second, only while the panel is open.
+let _localFallbackPollTimer = null;
+
+async function loadLocalFallback(){
+  await _refreshLocalFallback();
+  // Restart the lightweight poller — keep it running while Settings is open.
+  if(_localFallbackPollTimer) clearInterval(_localFallbackPollTimer);
+  _localFallbackPollTimer = setInterval(_refreshLocalFallback, 2500);
+}
+
+async function _refreshLocalFallback(){
+  const dot = document.getElementById('localFallbackDot');
+  const status = document.getElementById('localFallbackStatus');
+  const toggle = document.getElementById('localFallbackToggle');
+  if(!dot || !status || !toggle) return;
+  try{
+    const s = await api('/api/local-fallback/status');
+    toggle.checked = !!s.enabled;
+    let dotColor = 'var(--muted)';
+    let text = '';
+    switch(s.ui_state){
+      case 'disabled':
+        text = 'Off — toggle on to download (~2.5 GB) and enable failover';
+        break;
+      case 'needs-download':
+      case 'missing-model-registry':
+        text = 'Will start downloading (~2.5 GB). Won\'t use any RAM until the model is in use.';
+        break;
+      case 'downloading': {
+        const ms = s.model_state || {};
+        const pct = (ms.bytes_total > 0)
+          ? Math.min(100, Math.round((ms.bytes_downloaded / ms.bytes_total) * 100)) : 0;
+        text = `Downloading ${_formatBytes(ms.bytes_downloaded||0)} / ${_formatBytes(ms.bytes_total||s.model_size_bytes||0)} (${pct}%)`;
+        dotColor = 'var(--success, #2ec27e)';
+        break;
+      }
+      case 'starting':
+      case 'warming':
+        text = 'Starting llama-server…';
+        dotColor = 'var(--success, #2ec27e)';
+        break;
+      case 'ready':
+        text = 'Ready — your provider failures will silently retry on the local model.';
+        dotColor = 'var(--success, #2ec27e)';
+        break;
+      case 'no-supervisor':
+        text = 'Supervisor not available — Local fallback only works inside the Fox container.';
+        break;
+      default:
+        text = '';
+    }
+    status.textContent = text;
+    dot.style.background = dotColor;
+  }catch(e){
+    // Silent — the tile is non-critical.
+  }
+}
+
+async function onLocalFallbackToggle(){
+  const toggle = document.getElementById('localFallbackToggle');
+  if(!toggle) return;
+  const path = toggle.checked ? '/api/local-fallback/enable' : '/api/local-fallback/disable';
+  toggle.disabled = true;
+  try{
+    const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const result = await r.json();
+    if(result.enabled !== undefined){
+      toggle.checked = !!result.enabled;
+    }
+    // Immediate re-render of the status line; the poller takes over from here.
+    _refreshLocalFallback();
+  }catch(e){
+    showToast('Could not change Local fallback setting');
+    // Revert checkbox to actual server-side state on error.
+    _refreshLocalFallback();
+  }finally{
+    toggle.disabled = false;
+  }
 }
 
 // ── Local model download manager (issue #10) ──────────────────────────────

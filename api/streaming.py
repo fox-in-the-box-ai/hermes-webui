@@ -1785,6 +1785,28 @@ def _run_agent_streaming(
                         'base_url': _fb_entry.get('base_url'),
                     }
 
+            # FITB local AI fallback (issue #9) — if the user has opted into
+            # the Settings → Providers "Local fallback" toggle AND the bundled
+            # llama-server is currently running with a downloaded model, plumb
+            # it through as the agent's fallback_model so the existing
+            # rate-limit-recovery / 5xx-retry path silently re-routes the
+            # request to the on-device model. Takes precedence over any
+            # `fallback_model` from config.yaml — the user's explicit toggle
+            # wins over a profile-level default. Failure modes are quiet:
+            # if the import or status check raises, we fall through to the
+            # original config-driven fallback (or none).
+            try:
+                from api.local_fallback import get_fallback_endpoint as _fitb_local_fallback
+                _fitb_endpoint = _fitb_local_fallback()
+            except Exception:
+                _fitb_endpoint = None
+            if _fitb_endpoint:
+                _fallback_resolved = {
+                    'model': _fitb_endpoint['model'],
+                    'provider': _fitb_endpoint['provider'],
+                    'base_url': _fitb_endpoint['base_url'],
+                }
+
             # Build kwargs defensively — guard newer params so the WebUI
             # degrades gracefully when run against an older hermes-agent build.
             # (fixes: TypeError: AIAgent.__init__() got an unexpected keyword

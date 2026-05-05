@@ -938,6 +938,19 @@
                 Not detected — <a href="https://ollama.com/download" target="_blank" rel="noopener">install Ollama</a> on your computer, then click Refresh. On Linux, the container needs <code>--add-host=host.docker.internal:host-gateway</code> (added by default in Fox v0.3.0+; older installs need to be re-created).
               </div>
             </div>
+            <!-- Local fallback (issue #9) -->
+            <div id="localFallbackCard" style="margin-top:14px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--code-bg)">
+              <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+                <div style="min-width:0;flex:1">
+                  <div style="font-weight:600;font-size:13px">Local fallback <span id="localFallbackDot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-left:6px;vertical-align:middle"></span></div>
+                  <div style="font-size:11px;color:var(--muted);margin-top:3px">Auto-switch to a small on-device AI when your provider is rate-limited or unreachable. ~2.5 GB download (one-time), ~3 GB RAM only while serving — process unloads when idle.</div>
+                  <div id="localFallbackStatus" style="font-size:11px;color:var(--muted);margin-top:6px;min-height:14px"></div>
+                </div>
+                <label style="display:inline-flex;align-items:center;cursor:pointer;flex-shrink:0">
+                  <input type="checkbox" id="localFallbackToggle" onchange="onLocalFallbackToggle()" style="margin:0">
+                </label>
+              </div>
+            </div>
           </div>
           <div class="settings-pane" id="settingsPaneSystem">
             <div class="settings-section-head">
