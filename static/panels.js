@@ -3250,7 +3250,7 @@ async function saveHostname(){
   }
 }
 
-// ── Local Ollama (issue #66) ────────────────────────────────────────────────
+// ── Local Ollama (issues #66, #67) ──────────────────────────────────────────
 
 function _formatBytes(n){
   if(!n || n <= 0) return '';
@@ -3260,18 +3260,44 @@ function _formatBytes(n){
   return (n < 10 ? n.toFixed(1) : Math.round(n)) + ' ' + units[i];
 }
 
+function _formatDuration(seconds){
+  if(!isFinite(seconds) || seconds <= 0) return '';
+  if(seconds < 60) return Math.round(seconds) + 's';
+  if(seconds < 3600){
+    const m = Math.floor(seconds/60), s = Math.round(seconds%60);
+    return m + 'm ' + (s < 10 ? '0' : '') + s + 's';
+  }
+  const h = Math.floor(seconds/3600), m = Math.round((seconds%3600)/60);
+  return h + 'h ' + (m < 10 ? '0' : '') + m + 'm';
+}
+
+// Recommended-models list. Used both as the empty-state CTAs and the
+// datalist in the pull form. Sizes are approximate — the actual size is
+// what /api/tags reports after the pull completes. (#67)
+const _OLLAMA_RECOMMENDED = [
+  {name:'llama3.1:8b',          blurb:'Good all-rounder',                 size:'4.7 GB'},
+  {name:'mistral:7b',           blurb:'Fast and capable',                 size:'4.1 GB'},
+  {name:'phi4-mini',            blurb:'Smallest, works on any machine',   size:'2.2 GB'},
+  {name:'deepseek-coder-v2:16b',blurb:'Best for code',                    size:'8.9 GB'},
+];
+
+let _ollamaPullActive = false;
+
 async function loadOllamaLocal(){
-  const dot = document.getElementById('ollamaLocalDot');
-  const statusEl = document.getElementById('ollamaLocalStatus');
-  const modelsEl = document.getElementById('ollamaLocalModels');
-  const emptyEl = document.getElementById('ollamaLocalEmpty');
-  const notFoundEl = document.getElementById('ollamaLocalNotFound');
+  const dot       = document.getElementById('ollamaLocalDot');
+  const statusEl  = document.getElementById('ollamaLocalStatus');
+  const diskEl    = document.getElementById('ollamaLocalDisk');
+  const modelsEl  = document.getElementById('ollamaLocalModels');
+  const recEl     = document.getElementById('ollamaLocalRecommended');
+  const pullEl    = document.getElementById('ollamaLocalPull');
+  const emptyEl   = document.getElementById('ollamaLocalEmpty');
+  const notFoundEl= document.getElementById('ollamaLocalNotFound');
   if(!dot || !statusEl) return;
 
-  // Reset visibility
-  if(modelsEl) modelsEl.style.display = 'none';
-  if(emptyEl) emptyEl.style.display = 'none';
-  if(notFoundEl) notFoundEl.style.display = 'none';
+  // Reset visibility (progress block stays as-is during an active pull).
+  for(const el of [diskEl, modelsEl, recEl, pullEl, emptyEl, notFoundEl]){
+    if(el) el.style.display = 'none';
+  }
 
   try{
     const s = await api('/api/ollama/status');
@@ -3283,42 +3309,108 @@ async function loadOllamaLocal(){
     }
     dot.style.background = 'var(--success, #2ec27e)';
     statusEl.textContent = 'Running on ' + (s.host || 'host') + (s.version ? ' · v' + s.version : '');
-    // Fetch models
+
+    // Always show pull form when daemon is reachable.
+    if(pullEl) pullEl.style.display = 'block';
+
     const ms = await api('/api/ollama/models');
     if(!ms.running || !Array.isArray(ms.models)){
       if(emptyEl) emptyEl.style.display = 'block';
+      _renderOllamaRecommended(recEl, []);
       return;
     }
+
+    // Disk-usage line — visible whether or not models are installed
+    // (so a fresh user sees "0 B across 0 models" → context for pull CTA).
+    if(diskEl){
+      diskEl.style.display = 'block';
+      const total = ms.total_size_bytes || 0;
+      diskEl.textContent = 'Total disk: ' + (_formatBytes(total) || '0 B') +
+        ' across ' + ms.models.length + ' model' + (ms.models.length === 1 ? '' : 's');
+    }
+
     if(ms.models.length === 0){
       if(emptyEl) emptyEl.style.display = 'block';
+      _renderOllamaRecommended(recEl, []);
       return;
     }
-    if(modelsEl){
-      modelsEl.innerHTML = '';
-      modelsEl.style.display = 'flex';
-      modelsEl.style.flexDirection = 'column';
-      modelsEl.style.gap = '6px';
-      for(const m of ms.models){
-        const row = document.createElement('div');
-        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px;border:1px solid var(--border2);border-radius:6px;background:var(--bg)';
-        const left = document.createElement('div');
-        left.innerHTML = '<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">' + (m.name || '?') + '</div>'
-          + '<div style="font-size:10px;color:var(--muted);margin-top:2px">'
-          + [m.parameter_size, m.quantization, _formatBytes(m.size_bytes)].filter(Boolean).join(' · ')
-          + '</div>';
-        const btn = document.createElement('button');
-        btn.className = 'btn-tiny';
-        btn.textContent = 'Use';
-        btn.onclick = () => useOllamaModel(m.name);
-        row.appendChild(left);
-        row.appendChild(btn);
-        modelsEl.appendChild(row);
-      }
-    }
+
+    _renderOllamaModelList(modelsEl, ms.models);
+
+    // Recommended card stays hidden once at least one model is installed —
+    // the pull form below covers further additions.
   }catch(e){
     dot.style.background = 'var(--muted)';
     statusEl.textContent = 'Detection failed.';
   }
+}
+
+function _renderOllamaModelList(modelsEl, models){
+  if(!modelsEl) return;
+  modelsEl.innerHTML = '';
+  modelsEl.style.display = 'flex';
+  modelsEl.style.flexDirection = 'column';
+  modelsEl.style.gap = '6px';
+  for(const m of models){
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px;border:1px solid var(--border2);border-radius:6px;background:var(--bg)';
+    const left = document.createElement('div');
+    left.style.cssText = 'min-width:0;flex:1';
+    const meta = [m.parameter_size, m.quantization, _formatBytes(m.size_bytes)].filter(Boolean).join(' · ');
+    left.innerHTML = '<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;overflow:hidden;text-overflow:ellipsis">' + _esc(m.name || '?') + '</div>'
+      + '<div style="font-size:10px;color:var(--muted);margin-top:2px">' + _esc(meta) + '</div>';
+    const right = document.createElement('div');
+    right.style.cssText = 'display:flex;gap:4px;flex-shrink:0';
+    const useBtn = document.createElement('button');
+    useBtn.className = 'btn-tiny';
+    useBtn.textContent = 'Use';
+    useBtn.title = 'Switch chat to this model';
+    useBtn.onclick = () => useOllamaModel(m.name);
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn-tiny';
+    delBtn.textContent = 'Delete';
+    delBtn.title = 'Remove this model from disk';
+    delBtn.style.color = 'var(--accent)';
+    delBtn.onclick = () => deleteOllamaModel(m.name, m.size_bytes);
+    right.appendChild(useBtn);
+    right.appendChild(delBtn);
+    row.appendChild(left);
+    row.appendChild(right);
+    modelsEl.appendChild(row);
+  }
+}
+
+function _renderOllamaRecommended(recEl, _alreadyInstalled){
+  if(!recEl) return;
+  recEl.innerHTML = '';
+  recEl.style.display = 'block';
+  const title = document.createElement('div');
+  title.style.cssText = 'font-size:11px;color:var(--muted);margin-bottom:6px';
+  title.textContent = 'You don\'t have any models yet. Popular choices:';
+  recEl.appendChild(title);
+  const list = document.createElement('div');
+  list.style.cssText = 'display:flex;flex-direction:column;gap:6px';
+  for(const r of _OLLAMA_RECOMMENDED){
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px;border:1px solid var(--border2);border-radius:6px;background:var(--bg)';
+    const left = document.createElement('div');
+    left.style.cssText = 'min-width:0;flex:1';
+    left.innerHTML = '<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">' + _esc(r.name) + '</div>'
+      + '<div style="font-size:10px;color:var(--muted);margin-top:2px">' + _esc(r.blurb) + ' · ' + _esc(r.size) + '</div>';
+    const btn = document.createElement('button');
+    btn.className = 'btn-tiny';
+    btn.textContent = 'Pull';
+    btn.onclick = () => pullOllamaModel(r.name);
+    row.appendChild(left);
+    row.appendChild(btn);
+    list.appendChild(row);
+  }
+  recEl.appendChild(list);
+}
+
+function _esc(s){
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 async function refreshOllamaLocal(){
@@ -3344,12 +3436,173 @@ async function useOllamaModel(name){
       return;
     }
     showToast('Now chatting with ' + name);
-    // Refresh model dropdown so the chat input reflects the change.
     if(typeof populateModelDropdown === 'function'){
       try{ populateModelDropdown(); }catch(e){}
     }
   }catch(e){
     showToast('Network error');
+  }
+}
+
+async function deleteOllamaModel(name, sizeHint){
+  if(!name) return;
+  const sizeStr = _formatBytes(sizeHint || 0);
+  const msg = sizeStr
+    ? `Delete ${name}? This will free ${sizeStr} on the host.`
+    : `Delete ${name}?`;
+  if(!confirm(msg)) return;
+  try{
+    const r = await fetch('/api/ollama/delete', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({model: name}),
+    });
+    const result = await r.json();
+    if(!result.ok){
+      showToast(result.error || 'Delete failed');
+      return;
+    }
+    const freed = result.freed_bytes ? ` — freed ${_formatBytes(result.freed_bytes)}` : '';
+    showToast(`Deleted ${name}${freed}`);
+    loadOllamaLocal();
+  }catch(e){
+    showToast('Network error');
+  }
+}
+
+function onOllamaPullClick(){
+  const inp = document.getElementById('ollamaPullName');
+  if(!inp) return;
+  const name = (inp.value || '').trim();
+  if(!name){
+    showToast('Enter a model name first');
+    return;
+  }
+  pullOllamaModel(name);
+  inp.value = '';
+}
+
+// Pull a model with live progress. Uses fetch streaming + manual SSE
+// parsing — EventSource doesn't support POST, and we want the request
+// body to carry the model name (not a query param) for symmetry with
+// the rest of the API surface. (#67)
+async function pullOllamaModel(name){
+  if(!name || _ollamaPullActive) return;
+  _ollamaPullActive = true;
+  const progressEl = document.getElementById('ollamaLocalProgress');
+  const pullBtn = document.getElementById('ollamaPullBtn');
+  if(pullBtn) pullBtn.disabled = true;
+
+  const renderProgress = (state) => {
+    if(!progressEl) return;
+    progressEl.style.display = 'block';
+    const pct = (state.total > 0) ? Math.min(100, Math.round((state.completed / state.total) * 100)) : 0;
+    const bar = state.total > 0 ? `${pct}%` : '';
+    const speed = state.bytesPerSec > 0 ? _formatBytes(state.bytesPerSec) + '/s' : '';
+    const eta = (state.total > 0 && state.bytesPerSec > 0)
+      ? _formatDuration((state.total - state.completed) / state.bytesPerSec) + ' left'
+      : '';
+    const sub = [state.status || '', state.total > 0 ? _formatBytes(state.completed) + ' / ' + _formatBytes(state.total) : '', speed, eta].filter(Boolean).join(' · ');
+    progressEl.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+        <div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">${_esc(name)}</div>
+        <div style="font-size:11px;color:var(--muted)">${bar}</div>
+      </div>
+      <div style="margin-top:6px;height:6px;background:var(--code-bg);border-radius:3px;overflow:hidden">
+        <div style="width:${pct}%;height:100%;background:var(--success,#2ec27e);transition:width 0.2s ease"></div>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px">${_esc(sub)}</div>
+    `;
+  };
+
+  // Per-pull state, used to compute speed (bytes/sec) over a moving window.
+  const state = {
+    status: 'starting',
+    completed: 0,
+    total: 0,
+    bytesPerSec: 0,
+    samples: [],   // [{t, completed}] — rolling 4-sample window
+  };
+
+  const ingest = (evt) => {
+    if(typeof evt.status === 'string') state.status = evt.status;
+    if(typeof evt.completed === 'number') state.completed = evt.completed;
+    if(typeof evt.total === 'number') state.total = evt.total;
+    const now = Date.now();
+    state.samples.push({t: now, completed: state.completed});
+    while(state.samples.length > 4) state.samples.shift();
+    if(state.samples.length >= 2){
+      const a = state.samples[0], b = state.samples[state.samples.length - 1];
+      const dt = (b.t - a.t) / 1000;
+      state.bytesPerSec = dt > 0 ? Math.max(0, (b.completed - a.completed) / dt) : 0;
+    }
+    renderProgress(state);
+  };
+
+  renderProgress(state);
+
+  try{
+    const r = await fetch('/api/ollama/pull', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({model: name}),
+    });
+    if(!r.ok || !r.body){
+      const text = await r.text().catch(() => '');
+      throw new Error(text || ('HTTP ' + r.status));
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buf = '';
+    let success = false;
+    let errorMsg = '';
+    while(true){
+      const {value, done} = await reader.read();
+      if(done) break;
+      buf += decoder.decode(value, {stream:true});
+      let idx;
+      while((idx = buf.indexOf('\n\n')) >= 0){
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        let event = 'message';
+        let data = '';
+        for(const line of block.split('\n')){
+          if(line.startsWith('event: ')) event = line.slice(7).trim();
+          else if(line.startsWith('data: ')) data = line.slice(6);
+        }
+        if(!data) continue;
+        let parsed = null;
+        try{ parsed = JSON.parse(data); }catch(e){ continue; }
+        if(event === 'progress'){
+          ingest(parsed);
+        }else if(event === 'done'){
+          success = true;
+        }else if(event === 'error'){
+          errorMsg = parsed.error || 'Unknown error';
+        }
+      }
+    }
+    if(success){
+      if(progressEl) progressEl.style.display = 'none';
+      showToast(`Pulled ${name}`);
+      // Reload the model list so the new model immediately appears in the
+      // picker — covers the "After pull completes, model immediately
+      // appears in the picker (cache invalidation)" AC.
+      loadOllamaLocal();
+    }else{
+      if(progressEl){
+        progressEl.innerHTML = `<div style="color:var(--accent);font-size:12px">Pull failed: ${_esc(errorMsg || 'unknown error')}</div>`;
+      }
+      showToast(`Pull failed: ${errorMsg || 'unknown error'}`);
+    }
+  }catch(e){
+    if(progressEl){
+      progressEl.innerHTML = `<div style="color:var(--accent);font-size:12px">Pull failed: ${_esc(e.message || String(e))}</div>`;
+    }
+    showToast(`Pull failed: ${e.message || e}`);
+  }finally{
+    _ollamaPullActive = false;
+    if(pullBtn) pullBtn.disabled = false;
   }
 }
 

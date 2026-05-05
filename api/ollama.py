@@ -22,13 +22,23 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
+
+
+# Ollama accepts model names like `llama3.1:8b`, `library/llama3.1:8b`,
+# `myorg/mymodel:latest`. We allow letters, digits, dot, colon, slash,
+# underscore, hyphen — explicitly reject shell metacharacters, whitespace,
+# path traversal, control chars. Cap length to a generous 200 to keep
+# error states friendly. (#67)
+_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
+_MODEL_NAME_MAX = 200
 
 
 # Ordered probe candidates. host.docker.internal first because that's the
@@ -116,29 +126,235 @@ def get_status(force_refresh: bool = False) -> dict[str, Any]:
 
 
 def get_models() -> dict[str, Any]:
-    """Return installed models from the detected Ollama daemon. Returns
-    `{"running": False, "models": []}` if no daemon was found."""
+    """Return installed models from the detected Ollama daemon plus
+    aggregate disk usage. Returns `{"running": False, "models": [],
+    "total_size_bytes": 0}` if no daemon was found."""
     p = _cached_probe()
     if not p.get("up"):
-        return {"running": False, "host": "", "models": []}
+        return {"running": False, "host": "", "models": [], "total_size_bytes": 0}
     base = p["host"]
     raw = _http_json(f"{base}/api/tags", timeout=3.0)
     if raw is None or not isinstance(raw, dict):
-        return {"running": False, "host": base, "models": [], "error": "Ollama responded but /api/tags failed"}
+        return {
+            "running": False, "host": base, "models": [], "total_size_bytes": 0,
+            "error": "Ollama responded but /api/tags failed",
+        }
     models = []
+    total = 0
     for entry in raw.get("models", []) or []:
         if not isinstance(entry, dict):
             continue
         details = entry.get("details") or {}
+        size = entry.get("size") or 0
+        if isinstance(size, (int, float)):
+            total += int(size)
         models.append({
             "name": entry.get("name") or entry.get("model") or "",
-            "size_bytes": entry.get("size") or 0,
+            "size_bytes": size,
             "parameter_size": details.get("parameter_size") or "",
             "quantization": details.get("quantization_level") or "",
             "family": details.get("family") or "",
             "modified_at": entry.get("modified_at") or "",
         })
-    return {"running": True, "host": base, "models": models}
+    return {
+        "running": True,
+        "host": base,
+        "models": models,
+        "total_size_bytes": total,
+    }
+
+
+def _validate_model_name(raw: Any) -> tuple[str, str | None]:
+    """Return (sanitized, error). Reject anything that smells like a
+    shell escape, path traversal, or empty input. Errors are
+    user-visible — keep them descriptive, never leak internals."""
+    if not isinstance(raw, str):
+        return "", "model name must be a string"
+    name = raw.strip()
+    if not name:
+        return "", "model name is required"
+    if len(name) > _MODEL_NAME_MAX:
+        return "", f"model name longer than {_MODEL_NAME_MAX} characters"
+    if not _MODEL_NAME_RE.match(name):
+        return "", "model name has invalid characters (allowed: letters, digits, . : / _ -)"
+    return name, None
+
+
+def _model_size_bytes(name: str) -> int:
+    """Look up an installed model's size from the cached tags listing.
+    Used to compute `freed_bytes` after a delete. Returns 0 if the model
+    isn't found (delete will surface the not-found error itself)."""
+    try:
+        listing = get_models()
+    except Exception:
+        return 0
+    for m in listing.get("models", []) or []:
+        if m.get("name") == name:
+            return int(m.get("size_bytes") or 0)
+    return 0
+
+
+# ── Pull (SSE-proxied) ─────────────────────────────────────────────────────
+
+
+def _iter_pull_stream(name: str) -> Iterator[dict[str, Any]]:
+    """Stream NDJSON events from Ollama's /api/pull. Yields parsed dicts.
+    Raises RuntimeError on probe-not-running or HTTP failure."""
+    p = _cached_probe()
+    if not p.get("up"):
+        raise RuntimeError("Local Ollama daemon not detected. Is it running?")
+    base = p["host"]
+    body = json.dumps({"model": name, "stream": True}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base}/api/pull",
+        method="POST",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        # Long-running stream — use a generous read timeout per chunk; the
+        # Ollama daemon emits progress lines steadily during a pull.
+        resp = urllib.request.urlopen(req, timeout=60.0)  # nosec B310 — internal HTTP only
+    except urllib.error.HTTPError as exc:
+        # Ollama returns 4xx with a JSON error body when e.g. the model
+        # name is unknown to its registry.
+        try:
+            err_body = json.loads(exc.read().decode("utf-8") or "{}")
+            msg = err_body.get("error") or f"Ollama HTTP {exc.code}"
+        except (ValueError, UnicodeDecodeError):
+            msg = f"Ollama HTTP {exc.code}"
+        raise RuntimeError(msg)
+    except (urllib.error.URLError, OSError) as exc:
+        raise RuntimeError(f"Could not reach Ollama: {exc}")
+
+    try:
+        for raw_line in resp:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("ollama pull: skipping non-JSON line: %r", line[:120])
+                continue
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
+
+
+def stream_pull(handler, name_raw: Any) -> None:
+    """Proxy Ollama's NDJSON pull stream as Server-Sent Events.
+
+    The browser uses EventSource (or a fetch+TextDecoder reader) to consume
+    the stream. We emit three event types:
+      - ``progress`` — every Ollama status line, with name/total/completed
+      - ``done`` — terminal success (Ollama emitted ``status: success``)
+      - ``error`` — anything that prevents completion (validation, daemon,
+        HTTP, JSON, network). On error we still close the stream cleanly.
+
+    On successful completion the detection cache is invalidated so the
+    next /api/ollama/models call sees the new model immediately.
+    """
+    name, err = _validate_model_name(name_raw)
+
+    # Header send — once started, no more `send_response` etc.
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.send_header("Connection", "keep-alive")
+    handler.end_headers()
+
+    def emit(event: str, data: dict[str, Any]) -> None:
+        payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+        try:
+            handler.wfile.write(payload.encode("utf-8"))
+            handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            raise  # let outer code stop iterating
+
+    if err:
+        try:
+            emit("error", {"error": err})
+        except Exception:
+            pass
+        return
+
+    saw_success = False
+    try:
+        for evt in _iter_pull_stream(name):
+            # Pass through verbatim plus the requested model name so the
+            # frontend can render multi-pull UIs in the future. Compute
+            # speed/ETA on the client side from total + completed deltas.
+            evt_with_ctx = dict(evt)
+            evt_with_ctx.setdefault("model", name)
+            emit("progress", evt_with_ctx)
+            if evt.get("status") == "success":
+                saw_success = True
+            # Ollama can also emit explicit error lines mid-stream
+            if "error" in evt and not saw_success:
+                emit("error", {"error": str(evt["error"])})
+                return
+        if saw_success:
+            clear_cache()
+            emit("done", {"model": name})
+        else:
+            emit("error", {"error": "Pull ended without a success marker"})
+    except RuntimeError as exc:
+        try:
+            emit("error", {"error": str(exc)})
+        except Exception:
+            pass
+    except (BrokenPipeError, ConnectionResetError):
+        # Client disconnected mid-pull — Ollama keeps pulling in the
+        # background (its design). We just stop streaming.
+        logger.info("ollama pull: client disconnected")
+
+
+# ── Delete ─────────────────────────────────────────────────────────────────
+
+
+def delete_model(name_raw: Any) -> dict[str, Any]:
+    """Delete a model. Returns ``{ok, freed_bytes, error?}``.
+    Looks up the model's size before delete so the UI can render
+    \"freed N MB\" feedback."""
+    name, err = _validate_model_name(name_raw)
+    if err:
+        return {"ok": False, "error": err}
+
+    p = _cached_probe()
+    if not p.get("up"):
+        return {"ok": False, "error": "Local Ollama daemon not detected. Is it running?"}
+
+    freed = _model_size_bytes(name)
+
+    base = p["host"]
+    body = json.dumps({"model": name}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base}/api/delete",
+        method="DELETE",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10.0) as resp:  # nosec B310
+            resp.read()  # drain any short body
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return {"ok": False, "error": f"Model not installed: {name}"}
+        try:
+            err_body = json.loads(exc.read().decode("utf-8") or "{}")
+            msg = err_body.get("error") or f"Ollama HTTP {exc.code}"
+        except (ValueError, UnicodeDecodeError):
+            msg = f"Ollama HTTP {exc.code}"
+        return {"ok": False, "error": msg}
+    except (urllib.error.URLError, OSError) as exc:
+        return {"ok": False, "error": f"Could not reach Ollama: {exc}"}
+
+    clear_cache()
+    return {"ok": True, "model": name, "freed_bytes": freed}
 
 
 # ── Model selection (writes config.yaml, hot-reloads gateway) ──────────────

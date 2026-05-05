@@ -902,7 +902,7 @@
             <div id="providersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="providers_empty">
               No configurable providers found.
             </div>
-            <!-- Local Ollama tile — issue #66 -->
+            <!-- Local Ollama tile — issues #66, #67 -->
             <div id="ollamaLocalCard" style="margin-top:14px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--code-bg)">
               <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
                 <div>
@@ -911,9 +911,28 @@
                 </div>
                 <button class="btn-tiny" onclick="refreshOllamaLocal()" title="Re-probe local Ollama" data-i18n-title="ollama_refresh">Refresh</button>
               </div>
+              <div id="ollamaLocalDisk" style="margin-top:8px;font-size:11px;color:var(--muted);display:none"></div>
+              <div id="ollamaLocalProgress" style="margin-top:10px;display:none;padding:10px;border:1px solid var(--border2);border-radius:6px;background:var(--bg)"></div>
               <div id="ollamaLocalModels" style="margin-top:10px;display:none"></div>
+              <div id="ollamaLocalRecommended" style="margin-top:10px;display:none"></div>
+              <div id="ollamaLocalPull" style="margin-top:10px;display:none">
+                <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Pull a new model</div>
+                <div style="display:flex;gap:6px">
+                  <input type="text" id="ollamaPullName" list="ollamaPullSuggest" placeholder="llama3.1:8b" autocomplete="off" spellcheck="false" style="flex:1;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">
+                  <datalist id="ollamaPullSuggest">
+                    <option value="llama3.1:8b">
+                    <option value="mistral:7b">
+                    <option value="phi4-mini">
+                    <option value="deepseek-coder-v2:16b">
+                    <option value="gemma3:4b">
+                    <option value="qwen3:4b">
+                  </datalist>
+                  <button class="btn-tiny" id="ollamaPullBtn" onclick="onOllamaPullClick()">Pull</button>
+                </div>
+                <div style="font-size:10px;color:var(--muted);margin-top:4px">Browse all at <a href="https://ollama.com/library" target="_blank" rel="noopener">ollama.com/library</a></div>
+              </div>
               <div id="ollamaLocalEmpty" style="margin-top:10px;display:none;font-size:12px;color:var(--muted)">
-                No models installed yet. Run <code>ollama pull llama3.1:8b</code> on your computer (or another model name from <a href="https://ollama.com/library" target="_blank" rel="noopener">ollama.com/library</a>), then click Refresh.
+                No models installed yet. Pick one from the recommendations above, or pull any model name from <a href="https://ollama.com/library" target="_blank" rel="noopener">ollama.com/library</a>.
               </div>
               <div id="ollamaLocalNotFound" style="margin-top:10px;display:none;font-size:12px;color:var(--muted)">
                 Not detected — <a href="https://ollama.com/download" target="_blank" rel="noopener">install Ollama</a> on your computer, then click Refresh. On Linux, the container needs <code>--add-host=host.docker.internal:host-gateway</code> (added by default in Fox v0.3.0+; older installs need to be re-created).

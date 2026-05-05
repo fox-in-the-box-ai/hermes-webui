@@ -2346,7 +2346,7 @@ def handle_post(handler, parsed) -> bool:
         result = handle_set_hostname(handler, body)
         return j(handler, result, status=200 if result.get("ok") else 400)
 
-    # ── Local Ollama (POST) — issue #66 ──
+    # ── Local Ollama (POST) — issues #66, #67 ──
     if parsed.path == "/api/ollama/refresh":
         from api.ollama import handle_post_refresh
         return j(handler, handle_post_refresh(handler))
@@ -2354,6 +2354,23 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/ollama/use-model":
         from api.ollama import handle_post_use_model
         result = handle_post_use_model(handler, body)
+        return j(handler, result, status=200 if result.get("ok") else 400)
+
+    # SSE-streamed pull (#67). Stream ownership lives entirely inside
+    # stream_pull — once it sends headers, no further response shaping
+    # from this routing layer. Returns True so the dispatcher knows the
+    # request was handled and doesn't fall through to 404.
+    if parsed.path == "/api/ollama/pull":
+        from api.ollama import stream_pull
+        stream_pull(handler, body.get("model", ""))
+        return True
+
+    # POST (not DELETE) for symmetry with the rest of our mutation
+    # endpoints — hermes-webui's request dispatcher doesn't route DELETE
+    # at the framework level. Body shape: {"model": "<name>"}. (#67)
+    if parsed.path == "/api/ollama/delete":
+        from api.ollama import delete_model
+        result = delete_model(body.get("model", ""))
         return j(handler, result, status=200 if result.get("ok") else 400)
 
     if parsed.path == "/api/session/new":
