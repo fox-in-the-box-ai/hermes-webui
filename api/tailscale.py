@@ -89,6 +89,105 @@ _POWER_USER_KEYS = (
     "tailscale_exit_node",
 )
 
+# QA fix: defense-in-depth validators for the power-user fields. Without
+# these, anything posted to /api/settings flows straight into `tailscale up`
+# argv as `--flag=value`. Even though subprocess.run uses shell=False (so
+# no classic shell injection), an attacker who controls settings.json can:
+#   - prefix a value with `-` to inject another flag (e.g. break advertise
+#     into `... --auth-key=tskey-xxx`)
+#   - use `--login-server` to redirect a user's auth flow to attacker-
+#     controlled headscale
+#   - smuggle newlines / control characters
+# Validators reject malformed input at both /api/settings save time AND at
+# argv build time (belt and suspenders).
+_MAX_OPT_LEN = 512
+_TS_HOSTNAME_RE = __import__("re").compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+_TS_TAG_RE = __import__("re").compile(r"^tag:[a-z][a-z0-9-]*$")
+_TS_ROUTE_RE = __import__("re").compile(
+    r"^(?:\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}|[0-9a-fA-F:]+/\d{1,3})$"
+)
+_TS_HOST_RE = __import__("re").compile(r"^[a-zA-Z0-9.\-_:/]+$")
+_TS_URL_RE = __import__("re").compile(r"^https?://[a-zA-Z0-9.\-_:/]+(?:/[a-zA-Z0-9.\-_:/?&=%~]*)?$")
+
+
+def _safe_str_value(v: Any, max_len: int = _MAX_OPT_LEN) -> str | None:
+    """Return v as a stripped string if it's safe to pass through to a
+    `tailscale up --flag=value` argument: not too long, no control chars,
+    no leading dash. Returns None if the value should be rejected."""
+    if v is None:
+        return ""
+    if not isinstance(v, str):
+        return None
+    s = v.strip()
+    if not s:
+        return ""
+    if len(s) > max_len:
+        return None
+    if s.startswith("-"):
+        return None  # blocks flag-injection
+    if any(ord(c) < 0x20 for c in s):
+        return None  # newlines, NUL, etc.
+    return s
+
+
+def _validate_ts_opt(field: str, value: Any) -> tuple[bool, str]:
+    """Return ``(ok, sanitized_or_error_msg)``. Used by both
+    save_settings (settings.json gate) and _build_up_argv (argv gate)."""
+    s = _safe_str_value(value)
+    if s is None:
+        return False, f"{field}: invalid characters or too long"
+    if not s:
+        return True, ""
+
+    if field == "login_server":
+        if not _TS_URL_RE.match(s):
+            return False, "login_server must be an http(s) URL"
+        return True, s
+    if field == "advertise_routes":
+        # comma-separated CIDRs
+        for part in (p.strip() for p in s.split(",")):
+            if not part:
+                continue
+            if not _TS_ROUTE_RE.match(part):
+                return False, f"advertise_routes: '{part}' is not a CIDR"
+        return True, s
+    if field == "advertise_tags":
+        for part in (p.strip() for p in s.split(",")):
+            if not part:
+                continue
+            if not _TS_TAG_RE.match(part):
+                return False, f"advertise_tags: '{part}' is not a tag:* string"
+        return True, s
+    if field == "exit_node":
+        # IP, hostname, or magic-DNS name
+        if not _TS_HOST_RE.match(s):
+            return False, "exit_node: invalid characters"
+        return True, s
+    if field == "hostname":
+        if not _TS_HOSTNAME_RE.match(s):
+            return False, "hostname: must match RFC 1035 label form"
+        return True, s
+    return True, s
+
+
+def validate_settings_dict(settings: dict) -> str | None:
+    """Used by api/config.save_settings to reject malformed Tailscale
+    power-user values BEFORE they hit settings.json. Returns an error
+    message string, or None if the dict is clean."""
+    field_map = {
+        "tailscale_login_server": "login_server",
+        "tailscale_advertise_routes": "advertise_routes",
+        "tailscale_advertise_tags": "advertise_tags",
+        "tailscale_exit_node": "exit_node",
+    }
+    for k, vfield in field_map.items():
+        if k not in settings:
+            continue
+        ok, msg = _validate_ts_opt(vfield, settings[k])
+        if not ok:
+            return msg
+    return None
+
 
 def _load_persisted_opts() -> dict[str, Any]:
     """Read the six power-user Tailscale flags from settings.json (#96
@@ -187,24 +286,30 @@ def _set_up_state(**fields) -> None:
 
 def _build_up_argv(opts: dict) -> list[str]:
     """Translate the request body into `tailscale up` flags. All keys are
-    optional. Hostname is the only flag we always pass — the rest are
-    user-supplied power-user knobs (Phase 2 will expose them in the UI).
+    optional. Each value passes through `_validate_ts_opt` first — silently
+    dropped if invalid (the request-time gate already rejected at /settings
+    save; this is defense in depth for the case where settings.json was
+    edited by hand or a future code path bypasses the gate).
     """
     argv = ["tailscale", "up", f"--timeout={int(_UP_TIMEOUT_S)}s"]
 
-    hostname = (opts.get("hostname") or "").strip()
+    def _safe(field: str) -> str:
+        ok, sanitized = _validate_ts_opt(field, opts.get(field, ""))
+        return sanitized if ok else ""
+
+    hostname = _safe("hostname")
     if hostname:
         argv.append(f"--hostname={hostname}")
 
-    login_server = (opts.get("login_server") or "").strip()
+    login_server = _safe("login_server")
     if login_server:
         argv.append(f"--login-server={login_server}")
 
-    advertise_routes = (opts.get("advertise_routes") or "").strip()
+    advertise_routes = _safe("advertise_routes")
     if advertise_routes:
         argv.append(f"--advertise-routes={advertise_routes}")
 
-    advertise_tags = (opts.get("advertise_tags") or "").strip()
+    advertise_tags = _safe("advertise_tags")
     if advertise_tags:
         argv.append(f"--advertise-tags={advertise_tags}")
 
@@ -214,7 +319,7 @@ def _build_up_argv(opts: dict) -> list[str]:
     if opts.get("accept_dns") is False:
         argv.append("--accept-dns=false")
 
-    exit_node = (opts.get("exit_node") or "").strip()
+    exit_node = _safe("exit_node")
     if exit_node:
         argv.append(f"--exit-node={exit_node}")
 

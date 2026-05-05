@@ -2462,7 +2462,21 @@ _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8}
 
 
 def save_settings(settings: dict) -> dict:
-    """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
+    """Save settings to disk. Returns the merged settings. Ignores unknown keys.
+
+    QA fix: validate the Tailscale power-user fields before they hit
+    settings.json. _build_up_argv re-validates as belt-and-suspenders, but
+    rejecting at this gate means a malformed value never gets persisted in
+    the first place.
+    """
+    try:
+        from api.tailscale import validate_settings_dict as _ts_validate
+        ts_err = _ts_validate(settings)
+        if ts_err:
+            raise ValueError(f"Tailscale setting rejected: {ts_err}")
+    except ImportError:
+        # Tailscale module not present in some test contexts — skip the gate.
+        pass
     current = load_settings()
     pending_theme = current.get("theme")
     pending_skin = current.get("skin")
@@ -2498,9 +2512,26 @@ def save_settings(settings: dict) -> dict:
                 not isinstance(v, str) or not _SETTINGS_LANG_RE.match(v)
             ):
                 continue
-            # Coerce bool keys
+            # Coerce bool keys. QA fix: bool("false") is True in Python —
+            # a curl POST with `{"hostname_prompted":"false"}` would silently
+            # flip the flag to True. Accept native booleans, JSON-stringified
+            # booleans, and obvious truthy/falsy strings; reject other types
+            # by leaving the prior value intact.
             if k in _SETTINGS_BOOL_KEYS:
-                v = bool(v)
+                if isinstance(v, bool):
+                    pass
+                elif isinstance(v, str):
+                    s = v.strip().lower()
+                    if s in ("true", "1", "yes", "on"):
+                        v = True
+                    elif s in ("false", "0", "no", "off", ""):
+                        v = False
+                    else:
+                        continue  # unrecognized — skip this key
+                elif isinstance(v, (int, float)):
+                    v = bool(v)
+                else:
+                    continue  # unsupported type — skip this key
             current[k] = v
     theme_value = pending_theme
     skin_value = pending_skin
