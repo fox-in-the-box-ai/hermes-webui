@@ -329,8 +329,24 @@ def _build_up_argv(opts: dict) -> list[str]:
     dropped if invalid (the request-time gate already rejected at /settings
     save; this is defense in depth for the case where settings.json was
     edited by hand or a future code path bypasses the gate).
+
+    QA fix v0.4.7: in FITB the Tailscale daemon runs as root (for
+    NET_ADMIN) and the webui runs as `foxinthebox` (per supervisord).
+    entrypoint.sh runs `tailscale set --operator=foxinthebox` after
+    boot to delegate user-mode CLI access — but Tailscale's `up`
+    semantics require any non-default preference to be re-stated on
+    every invocation, otherwise it errors with "changing settings via
+    'tailscale up' requires mentioning all non-default flags".
+    Including --operator=foxinthebox unconditionally keeps `up` working
+    no matter what other prefs are sticky on the daemon. Without this,
+    the entire desktop Tailscale flow (#96) silently 1-exits with
+    'Access denied: login access denied' — bug surfaced in v0.4.7 QA.
     """
-    argv = ["tailscale", "up", f"--timeout={int(_UP_TIMEOUT_S)}s"]
+    argv = [
+        "tailscale", "up",
+        "--operator=foxinthebox",
+        f"--timeout={int(_UP_TIMEOUT_S)}s",
+    ]
 
     def _safe(field: str) -> str:
         ok, sanitized = _validate_ts_opt(field, opts.get(field, ""))
@@ -419,18 +435,22 @@ def _up_subprocess(argv: list[str], env: dict | None, attempt_id: int) -> None:
         _up_proc = proc
         _up_log.clear()
 
+    # QA fix v0.4.7-WaveG: scrape the auth URL from `tailscale status
+    # --json`'s AuthURL field, NOT from the subprocess's stdout. Tailscale
+    # block-buffers stdout when not attached to a TTY, so the URL line
+    # never reaches Python until the subprocess exits — meanwhile the
+    # daemon already knows the URL and exposes it in status. Polling
+    # status every second also gives us a clean way to detect the
+    # awaiting-auth → Running transition without depending on subprocess
+    # behavior.
     auth_url = ""
     stdout = proc.stdout
-    if stdout is None:
-        # Should not happen with stdout=PIPE, but bail safely.
-        proc.wait()
-        _set_up_state(attempt_id, state="failed", error="tailscale up: no stdout", ended_at=time.time())
-        return
+    POLL_INTERVAL = 1.0
 
     while True:
-        # Deadline check fires every loop iteration regardless of whether
-        # the subprocess has produced output. select() with a 1s timeout
-        # ensures readline never blocks longer than 1s without checking.
+        # Deadline check fires every loop iteration regardless of subprocess
+        # output. We don't read from stdout at all — the subprocess just
+        # needs to stay alive while the user authenticates in the browser.
         if time.time() > deadline:
             try:
                 proc.kill()
@@ -439,7 +459,7 @@ def _up_subprocess(argv: list[str], env: dict | None, attempt_id: int) -> None:
             _set_up_state(attempt_id, state="failed", error="auth timed out before completion", ended_at=time.time())
             break
 
-        # Was the attempt superseded (e.g. user clicked Connect again)?
+        # Was the attempt superseded?
         with _up_lock:
             if _up_state.get("attempt_id") != attempt_id:
                 try:
@@ -448,29 +468,55 @@ def _up_subprocess(argv: list[str], env: dict | None, attempt_id: int) -> None:
                     pass
                 break
 
-        try:
-            ready, _, _ = select.select([stdout], [], [], 1.0)
-        except (ValueError, OSError):
-            # stdout closed underneath us — fall through to wait()
+        # Subprocess exited? — drop out of the polling loop and let the
+        # rc-handling block below decide running/failed.
+        if proc.poll() is not None:
             break
-        if not ready:
-            # No output in the last second; check if process exited.
-            if proc.poll() is not None:
-                break
-            continue
 
-        line = stdout.readline()
-        if not line:
-            # EOF — process exited
-            break
-        line = line.rstrip()
-        with _up_lock:
-            _up_log.append(line)
+        # Probe daemon status for the auth URL or terminal Running state.
+        st = get_status()
+        bs = st.get("backend_state", "")
+        # The daemon exposes AuthURL on the raw status JSON. get_status()
+        # doesn't surface it (UI doesn't need it), so peek directly.
         if not auth_url:
-            url = _scrape_auth_url(line)
-            if url:
-                auth_url = url
-                _set_up_state(attempt_id, state="awaiting-auth", auth_url=url)
+            try:
+                rc, out, _err = _run_tailscale(["status", "--json"], timeout=3.0)
+                if rc == 0 and out:
+                    raw = json.loads(out)
+                    candidate = raw.get("AuthURL") or ""
+                    if candidate:
+                        auth_url = candidate
+                        _set_up_state(attempt_id, state="awaiting-auth", auth_url=candidate)
+            except Exception:
+                pass
+
+        # Promote to running as soon as the daemon reports it — kills the
+        # `tailscale up` subprocess promptly so the rc=0 / configure_serve
+        # path runs.
+        if bs == "Running":
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            break
+
+        # Drain any subprocess stdout into the log without blocking — useful
+        # for diagnostics on failed attempts. This is best-effort: select()
+        # avoids blocking, the buffered-text issue means we may not see
+        # everything in real time, but we still get partial diagnostic
+        # context for the failure-tail in the next block.
+        if stdout is not None:
+            try:
+                ready, _, _ = select.select([stdout], [], [], 0.0)
+                if ready:
+                    line = stdout.readline()
+                    if line:
+                        with _up_lock:
+                            _up_log.append(line.rstrip())
+            except (ValueError, OSError):
+                pass
+
+        time.sleep(POLL_INTERVAL)
 
     rc = proc.wait()
 
