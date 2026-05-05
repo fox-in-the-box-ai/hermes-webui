@@ -210,6 +210,64 @@ label {
   cursor: not-allowed;
 }
 
+.btn-secondary {
+  background: rgba(249, 115, 22, 0.12);
+  color: #f97316;
+  width: 100%;
+  border: 1px solid rgba(249, 115, 22, 0.4);
+}
+
+.btn-secondary:hover {
+  background: rgba(249, 115, 22, 0.2);
+}
+
+.btn-link {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 12px;
+  padding: 6px 12px;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.btn-link:hover {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.skip-row {
+  margin-top: 14px;
+  text-align: center;
+}
+
+.ollama-detected {
+  margin-top: 18px;
+  padding: 14px;
+  border: 1px solid rgba(45, 212, 191, 0.4);
+  border-radius: 8px;
+  background: rgba(45, 212, 191, 0.08);
+}
+
+.ollama-detected-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: #2dd4bf;
+  margin-bottom: 6px;
+}
+
+.ollama-detected p {
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+
+.ollama-detected code {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
 .btn-actions {
   display: flex;
   flex-direction: column;

@@ -26,12 +26,28 @@ _SETUP_PREFIXES = ("/setup", "/api/setup/", "/static/setup.", "/health", "/stati
 
 
 def onboarding_complete() -> bool:
-    """Check whether onboarding has been completed."""
+    """Check whether onboarding has been completed.
+
+    Reads either of two state surfaces — historical FITB
+    `onboarding.json:completed` and Hermes WebUI's
+    `settings.json:onboarding_completed` — and returns True if either is
+    set. Issue #11 added the `settings.json` write so future code that
+    sets it directly (e.g. CLI bootstrappers) is honoured by the
+    redirect middleware. Either flag flipping unlocks the chat UI.
+    """
     try:
         with open(ONBOARDING_PATH) as f:
-            return json.load(f).get("completed", False) is True
+            if json.load(f).get("completed", False) is True:
+                return True
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return False
+        pass
+    try:
+        from api.config import load_settings
+        if load_settings().get("onboarding_completed") is True:
+            return True
+    except Exception:  # broad on purpose — settings are auxiliary state
+        pass
+    return False
 
 
 def is_setup_path(path: str) -> bool:
@@ -141,17 +157,93 @@ def handle_setup_openrouter(handler, body: dict) -> dict:
 
 
 def handle_setup_complete(handler, body: dict) -> dict:
-    """Mark onboarding as complete and write the state file."""
+    """Mark onboarding as complete and write the state files."""
     tailscale_connected = bool(body.get("tailscale_connected", False))
+    return _mark_onboarding_complete(
+        skipped=False,
+        extra={"tailscale_connected": tailscale_connected},
+    )
 
+
+def handle_setup_skip(handler, body: dict) -> dict:
+    """Mark onboarding as skipped (no API key collected). Issue #11.
+
+    Provides an exit hatch for users who want to configure providers
+    later via Settings → Providers, or who'll rely on local Ollama
+    (#66). Sets the same completion flags as a normal finish — the
+    redirect middleware unlocks the main UI immediately.
+    """
+    return _mark_onboarding_complete(skipped=True)
+
+
+def _mark_onboarding_complete(*, skipped: bool, extra: dict | None = None) -> dict:
+    """Write both `onboarding.json` and `settings.json:onboarding_completed`.
+
+    Two state surfaces are kept in sync (issue #11) so the redirect
+    middleware and the WebUI settings panel agree. Failure to write
+    settings.json is non-fatal — onboarding.json is the authoritative
+    flag for the redirect.
+    """
     ONBOARDING_PATH.parent.mkdir(parents=True, exist_ok=True)
     state = {
         "completed": True,
         "completed_at": datetime.now(timezone.utc).isoformat(),
-        "tailscale_connected": tailscale_connected,
+        "skipped": bool(skipped),
     }
+    if extra:
+        state.update(extra)
     ONBOARDING_PATH.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
-    return {"ok": True}
+
+    # Mirror to settings.json:onboarding_completed so any code path that
+    # consults settings (e.g. future CLI bootstrappers) sees the same truth.
+    try:
+        from api.config import load_settings, save_settings
+        s = load_settings()
+        s["onboarding_completed"] = True
+        save_settings(s)
+    except Exception as exc:
+        logger.debug("Could not mirror onboarding flag to settings.json: %s", exc)
+
+    return {"ok": True, "skipped": bool(skipped)}
+
+
+# ── Welcome content ─────────────────────────────────────────────────────────
+
+# Externalized so the welcome message can be edited per install without a
+# code change (issue #11 AC: "Script is externalised — editable without
+# code change"). Plain text, paragraphs separated by blank lines. The
+# default below ships in packages/integration/default-configs/onboarding.md
+# and is copied into /data/config on first container run by entrypoint.sh.
+
+_ONBOARDING_MD_PATH = Path(os.environ.get(
+    "ONBOARDING_MD_PATH", "/data/config/onboarding.md"
+))
+
+_DEFAULT_WELCOME = (
+    "Let's get you set up. This will only take a minute.\n\n"
+    "Bring an OpenRouter API key for cloud models, or skip this wizard "
+    "if you're running a local AI on your computer (Ollama, LM Studio, "
+    "etc.) — you can configure providers any time from Settings."
+)
+
+
+def read_welcome_text() -> str:
+    """Return the welcome paragraph(s) for the wizard's first step.
+    Reads /data/config/onboarding.md if present, falls back to the
+    bundled default."""
+    try:
+        if _ONBOARDING_MD_PATH.exists():
+            text = _ONBOARDING_MD_PATH.read_text(encoding="utf-8").strip()
+            if text:
+                return text
+    except OSError as exc:
+        logger.debug("Could not read %s: %s", _ONBOARDING_MD_PATH, exc)
+    return _DEFAULT_WELCOME
+
+
+def handle_setup_welcome(handler) -> dict:
+    """GET /api/setup/welcome — returns the (editable) welcome text."""
+    return {"text": read_welcome_text()}
 
 
 def handle_setup_restart(handler) -> dict:
