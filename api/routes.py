@@ -1643,6 +1643,11 @@ def handle_get(handler, parsed) -> bool:
         handle_setup_page(handler)
         return True
 
+    # ── Tailscale hostname (GET) — issue #44 ──
+    if parsed.path == "/api/settings/hostname":
+        from api.hostname import handle_get_hostname
+        return j(handler, handle_get_hostname(handler))
+
     if parsed.path == "/api/models":
         return j(handler, get_available_models())
 
@@ -2316,6 +2321,12 @@ def handle_post(handler, parsed) -> bool:
         from api.onboarding import handle_setup_restart
         result = handle_setup_restart(handler)
         return j(handler, result, status=200 if result.get("ok") else 500)
+
+    # ── Tailscale hostname (POST) — issue #44 ──
+    if parsed.path == "/api/settings/hostname":
+        from api.hostname import handle_set_hostname
+        result = handle_set_hostname(handler, body)
+        return j(handler, result, status=200 if result.get("ok") else 400)
 
     if parsed.path == "/api/session/new":
         try:

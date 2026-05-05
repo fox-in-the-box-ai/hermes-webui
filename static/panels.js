@@ -3172,9 +3172,80 @@ async function loadSettingsPanel(){
     }catch(e){}
     _syncHermesPanelSessionActions();
     loadProvidersPanel(); // load provider cards in background
+    loadHostnameSettings(); // tailscale hostname (issue #44) — best-effort
     switchSettingsSection(_settingsSection);
   }catch(e){
     showToast(t('settings_load_failed')+e.message);
+  }
+}
+
+// ── Tailscale hostname (issue #44) ──────────────────────────────────────────
+
+async function loadHostnameSettings(){
+  const input = document.getElementById('settingsHostname');
+  const status = document.getElementById('settingsHostnameStatus');
+  if(!input || !status) return;
+  try{
+    const state = await api('/api/settings/hostname');
+    if(state.configured){
+      input.value = state.configured;
+    }else if(state.default_suggestion){
+      input.placeholder = state.default_suggestion;
+    }
+    if(state.tailscale_running){
+      if(state.effective && state.effective !== state.configured){
+        status.textContent = 'Live on tailnet as: ' + state.effective + ' (collision suffix)';
+      }else if(state.effective){
+        status.textContent = 'Live on tailnet as: ' + state.effective;
+      }else{
+        status.textContent = 'Tailscale running, no hostname set yet.';
+      }
+    }else{
+      status.textContent = 'Tailscale not active in this container — hostname will apply on next start.';
+    }
+  }catch(e){
+    // Silent — hostname UI is non-critical.
+    status.textContent = '';
+  }
+}
+
+async function saveHostname(){
+  const input = document.getElementById('settingsHostname');
+  const status = document.getElementById('settingsHostnameStatus');
+  if(!input) return;
+  const raw = (input.value || '').trim();
+  if(!raw){
+    if(status) status.textContent = 'Enter a name first.';
+    return;
+  }
+  if(status) status.textContent = 'Applying…';
+  try{
+    const r = await fetch('/api/settings/hostname', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({hostname: raw}),
+    });
+    const result = await r.json();
+    if(!result.ok){
+      if(status) status.textContent = result.error || 'Failed to apply hostname.';
+      return;
+    }
+    if(result.requested_hostname && result.requested_hostname !== raw){
+      // Sanitization adjusted the value; reflect that in the field.
+      input.value = result.requested_hostname;
+    }
+    if(status){
+      if(result.applied_live){
+        status.textContent = result.collision_suffixed
+          ? ('Saved. Live on tailnet as: ' + result.effective_hostname + ' (collision suffix)')
+          : ('Saved. Live on tailnet as: ' + result.effective_hostname);
+      }else{
+        status.textContent = result.note || 'Saved. Will apply on next container start.';
+      }
+    }
+    showToast('Hostname saved');
+  }catch(e){
+    if(status) status.textContent = 'Network error.';
   }
 }
 
