@@ -324,9 +324,21 @@ def _start_when_ready(timeout_s: float = 600.0, poll_s: float = 1.0) -> None:
 
     This handles the long-tail case of a 2.5 GB download — we don't want
     the toggle-on POST to block until the bytes finish, but we DO want
-    llama-server to come up automatically when they do."""
+    llama-server to come up automatically when they do.
+
+    QA fix: previously this loop ignored the download job's actual state.
+    If the download went to ``failed`` or ``cancelled``, the file never
+    appeared — the watcher silently slept until ``deadline`` (10 minutes
+    at default) and the user sat on the wizard's 30-minute polling clock
+    seeing "Downloading X%" for an additional 20 minutes after the
+    actual failure. Now we also check the job state and bail with a
+    clear error pushed into the next get_status() snapshot via the
+    download manager's own state, which the wizard already surfaces.
+    """
     try:
-        from api.models_download import KNOWN_MODELS, _is_final_present
+        from api.models_download import (
+            KNOWN_MODELS, _is_final_present, list_models,
+        )
     except Exception:
         return
     model = KNOWN_MODELS.get(MODEL_ID)
@@ -340,6 +352,23 @@ def _start_when_ready(timeout_s: float = 600.0, poll_s: float = 1.0) -> None:
             res = start_llama_server()
             logger.info("Local fallback: model ready, started llama-server: %s", res)
             return
+        # Check the download job state — bail out of the watcher if the
+        # download moved to a terminal failure state. The model entry's
+        # state.status is the source of truth from #10's manager.
+        try:
+            entries = list_models().get("models", [])
+            entry = next((m for m in entries if m.get("id") == MODEL_ID), None)
+            status = ((entry or {}).get("state") or {}).get("status") or ""
+            if status in ("failed", "cancelled"):
+                logger.warning(
+                    "Local fallback: download status=%s — abandoning start watcher",
+                    status,
+                )
+                return
+        except Exception:
+            # Don't let a transient list_models() hiccup kill the watcher;
+            # just keep polling for the file.
+            logger.debug("Local fallback: list_models check failed", exc_info=True)
         time.sleep(poll_s)
 
 
@@ -392,44 +421,75 @@ def disable() -> dict[str, Any]:
 # ── Remote-health probe (#9 polish recovery banner) ───────────────────────
 
 
+_REMOTE_HEALTH_PROBE_URLS = (
+    # Order matters: try each in turn until one succeeds. Each must be a
+    # cheap unauth'd GET that returns 200 when the host is reachable.
+    # These are the public model-list endpoints for the providers FITB
+    # users are most likely to use; we don't need to authenticate to
+    # know "the network path to this provider works". If any one returns
+    # 200 we declare remote_healthy.
+    ("openrouter", "https://openrouter.ai/api/v1/models"),
+    ("openai", "https://api.openai.com/v1/models"),  # 401 without key, but 401 means reachable
+    ("anthropic", "https://api.anthropic.com/v1/models"),  # same: 401 = reachable
+)
+
+
+def _probe_one(url: str, timeout: float = 5.0) -> tuple[bool, str]:
+    """GET ``url``, return (ok, error). ``ok`` is True if we got *any*
+    HTTP response (2xx, 4xx, 5xx) — only network-level failures
+    (DNS, refused, timeout) count as unreachable. A 401/403 from
+    api.openai.com still proves the network path works."""
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "fitb-remote-health/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return (200 <= r.status < 600), ""
+    except urllib.error.HTTPError:
+        # Got a real HTTP response (e.g. 401 unauth'd) — host is reachable.
+        return True, ""
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return False, str(exc)
+
+
 def get_remote_health() -> dict[str, Any]:
     """Lightweight reachability probe used by the recovery banner (#9
     polish). Returns ``{remote_healthy, tested_url, error}``.
 
-    Strategy: GET https://openrouter.ai/api/v1/models with a 5s timeout.
-    OpenRouter is the FITB default provider; its public /models endpoint
-    returns 200 without auth, so a 200 is a strong signal that (a) the
-    user has internet, and (b) the most common remote provider is
-    reachable. We don't need per-provider probing for the banner UX —
-    if OpenRouter is up, the user's chosen provider is *probably* up too,
-    and if not, the user's next chat will fail and the modal re-fires.
-
-    Cached for 30s in-process so repeated polls don't hammer OpenRouter
-    when multiple browser tabs are open.
+    QA fix: previously hardcoded to OpenRouter, which was misleading for
+    users on Anthropic / OpenAI direct / a custom provider. Now we probe
+    multiple provider hosts in order and declare the network healthy if
+    *any* responds. A 401 from api.openai.com counts as healthy — the
+    network path works; the only thing the probe can't tell us is
+    whether the user's actual API key is valid, but that's the modal's
+    job (a real chat will surface auth errors plainly). 30s in-process
+    cache so multi-tab polling doesn't multiply requests.
     """
     now = time.time()
     cache = _remote_health_cache
     if cache and (now - cache["at"]) < 30.0:
         return cache["result"]
 
-    url = "https://openrouter.ai/api/v1/models"
-    result: dict[str, Any]
-    try:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "fitb-remote-health/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=5) as r:
+    last_err = ""
+    for label, url in _REMOTE_HEALTH_PROBE_URLS:
+        ok, err = _probe_one(url, timeout=5.0)
+        if ok:
             result = {
-                "remote_healthy": 200 <= r.status < 300,
+                "remote_healthy": True,
                 "tested_url": url,
+                "tested_provider": label,
                 "error": "",
             }
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        result = {
-            "remote_healthy": False,
-            "tested_url": url,
-            "error": str(exc),
-        }
+            _remote_health_cache.update(at=now, result=result)
+            return result
+        last_err = err
+
+    result = {
+        "remote_healthy": False,
+        "tested_url": _REMOTE_HEALTH_PROBE_URLS[-1][1],
+        "tested_provider": "",
+        "error": last_err or "all probes failed",
+    }
     _remote_health_cache.update(at=now, result=result)
     return result
 

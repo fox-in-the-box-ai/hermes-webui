@@ -388,15 +388,20 @@ def use_model(model_name: str) -> dict[str, Any]:
     cfg = get_config()
     if not isinstance(cfg, dict):
         cfg = {}
-    model_cfg = cfg.get("model")
-    if not isinstance(model_cfg, dict):
-        model_cfg = {}
-    model_cfg["provider"] = "custom"
-    model_cfg["base_url"] = base_url
-    model_cfg["name"] = name
-    # Local Ollama is keyless; clear any stale top-level api_key so a prior
-    # provider's key isn't accidentally sent on requests.
-    model_cfg.pop("api_key", None)
+    # QA fix: previously we mutated the existing model_cfg dict and only
+    # popped api_key. Provider-specific keys (azure_endpoint,
+    # azure_api_version, aws_region, aws_access_key_id, aws_secret_access_key,
+    # vertex_project, openai_organization, custom headers, etc.) leaked
+    # through into the local-Ollama config — at minimum a stale-secrets
+    # exposure in the config file the user thought they "switched away from",
+    # at worst those keys riding along on requests if the OpenAI-compat
+    # client respects them. Replace the model block wholesale instead of
+    # patching it.
+    model_cfg = {
+        "provider": "custom",
+        "base_url": base_url,
+        "name": name,
+    }
     cfg["model"] = model_cfg
 
     try:
