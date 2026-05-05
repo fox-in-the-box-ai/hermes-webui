@@ -128,6 +128,22 @@ def _read_effective_hostname() -> str | None:
     return self_node.get("HostName") or None
 
 
+def _read_backend_state() -> str:
+    """Return the BackendState (NoState / NeedsLogin / NeedsMachineAuth /
+    Stopped / Starting / Running) or empty string. Used to gate the
+    post-wizard hostname prompt — Self.HostName is set well before the
+    user has actually authenticated, so checking only "tailscale running"
+    fired the prompt before the user joined the tailnet (#68 QA bug)."""
+    rc, out, _err = _run_tailscale(["status", "--json"], timeout=5.0)
+    if rc != 0 or not out:
+        return ""
+    try:
+        status = json.loads(out)
+    except json.JSONDecodeError:
+        return ""
+    return status.get("BackendState") or ""
+
+
 def get_hostname_state() -> dict[str, Any]:
     """Read everything the Settings UI needs to render the hostname field."""
     configured = _read_configured_hostname()
@@ -145,6 +161,14 @@ def get_hostname_state() -> dict[str, Any]:
         "effective": effective or "",
         "default_suggestion": default_hostname() if not configured else "",
         "tailscale_running": effective is not None,
+        # QA fix: explicit BackendState so the post-wizard prompt
+        # (hostname-prompt.js) can fire only after the user has actually
+        # joined the tailnet — Self.HostName is populated long before
+        # BackendState reaches Running, so the previous predicate
+        # (tailscale_running && !configured && !prompted) fired the
+        # prompt during NeedsLogin state and the user dismissed it
+        # because "I haven't even auth'd yet".
+        "backend_state": _read_backend_state(),
         "prompted": prompted,
     }
 

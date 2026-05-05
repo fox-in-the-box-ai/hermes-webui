@@ -39,8 +39,15 @@
   function shouldShow(state) {
     if (!state) return false;
     if (state.prompted) return false;            // already answered
-    if (!state.tailscale_running) return false;  // no tailnet, no friendly name to pick
     if (state.configured) return false;          // user already set it (Settings or env)
+    // QA fix: don't fire while Tailscale is NeedsLogin / NeedsMachineAuth /
+    // Starting / Stopped / NoState. Self.HostName is populated as soon as
+    // the daemon knows its own preferred name, well before BackendState
+    // becomes Running. Firing pre-Running confused users into clicking
+    // Skip ("why are you asking? I haven't even connected yet"), and
+    // because Skip persists prompted=true, they never got the prompt
+    // again after they actually joined the tailnet.
+    if (state.backend_state !== 'Running') return false;
     return true;
   }
 

@@ -292,6 +292,24 @@ label {
   transition: width 0.4s ease;
 }
 
+/* Indeterminate variant when bytes_total is unknown — animated stripe
+   so the user knows something is happening (QA fix). */
+.dl-bar-indeterminate {
+  position: relative;
+  overflow: hidden;
+}
+.dl-bar-indeterminate .dl-bar-fill {
+  position: absolute;
+  width: 30%;
+  left: -30%;
+  background: #2dd4bf;
+  animation: dl-bar-slide 1.4s linear infinite;
+}
+@keyframes dl-bar-slide {
+  0%   { left: -30%; }
+  100% { left: 100%; }
+}
+
 /* ── Spinner ────────────────────────────────────────────────────────────── */
 
 .spinner {

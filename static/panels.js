@@ -3255,8 +3255,10 @@ async function saveHostname(){
 
 // ── Tailscale connection (issue #96, phase 1) ───────────────────────────────
 
-let _tsPollTimer = null;
+let _tsPollTimer = null;            // active connect-flow poll
+let _tsStatusRefreshTimer = null;   // QA fix: lightweight status auto-refresh
 const _TS_POLL_MS = 2000;
+const _TS_STATUS_REFRESH_MS = 15000;
 
 function _tsRender(state){
   // Render the badge + URL + button visibility for the current snapshot.
@@ -3314,6 +3316,39 @@ async function loadTailscaleConnection(){
   }catch(e){
     _tsRender({ backend_state: 'Unknown' });
   }
+  // QA fix: tile previously loaded once on Settings open and never
+  // refreshed. If the tunnel dropped while the user was looking at
+  // Settings, the badge stayed Connected forever. Now we kick a 15s
+  // status refresh while the tile is in the DOM. (Connect's own poller
+  // is faster — 2s — and pre-empts this; this is the steady-state poll.)
+  _startTsStatusRefresh();
+}
+
+function _startTsStatusRefresh(){
+  if(_tsStatusRefreshTimer) return;
+  const tick = async () => {
+    // Stop refreshing if the tile is off-screen (Settings tab closed,
+    // or the user navigated away). The hidden API gives us a tab-level
+    // "is this page visible" signal cheaply.
+    const tile = document.getElementById('tsSettingsTile');
+    if(!tile || document.hidden){
+      _tsStatusRefreshTimer = setTimeout(tick, _TS_STATUS_REFRESH_MS);
+      return;
+    }
+    // If the connect-flow poller is active, defer to it.
+    if(_tsPollTimer){
+      _tsStatusRefreshTimer = setTimeout(tick, _TS_STATUS_REFRESH_MS);
+      return;
+    }
+    try{
+      const state = await api('/api/tailscale/status');
+      _tsRender(state);
+    }catch(e){
+      // Silent — keep ticking. Tile will simply not update this round.
+    }
+    _tsStatusRefreshTimer = setTimeout(tick, _TS_STATUS_REFRESH_MS);
+  };
+  _tsStatusRefreshTimer = setTimeout(tick, _TS_STATUS_REFRESH_MS);
 }
 
 // Pre-populate the advanced accordion fields from persisted settings
@@ -3350,11 +3385,31 @@ async function tsSaveAdvanced(){
       body: JSON.stringify(payload),
     });
     if(!r.ok){
-      if(status) status.textContent = 'Save failed (HTTP ' + r.status + ').';
+      // QA fix: surface the validator's reason (e.g. "advertise_routes:
+      // '10.0.0/24' is not a CIDR") instead of just an HTTP status.
+      let detail = '';
+      try{ const d = await r.json(); detail = d && (d.error || d.message) || ''; }catch(_){}
+      if(status) status.textContent = detail || ('Save failed (HTTP ' + r.status + ').');
       return;
     }
-    if(status) status.textContent = 'Saved. Will apply on next Connect.';
+    if(status) status.textContent = 'Saved.';
     showToast('Advanced Tailscale settings saved');
+    // QA fix: previously the tile said "Will apply on next Connect" and
+    // left the user to figure out the reconnect step. If Tailscale is
+    // currently Running, offer to reconnect-with-new-settings inline.
+    try{
+      const cur = await api('/api/tailscale/status');
+      if(cur && cur.backend_state === 'Running'){
+        if(confirm('Apply new settings now? This will briefly disconnect and reconnect Tailscale.')){
+          // Logout to clear the current tunnel, then Connect picks up
+          // the new persisted settings via _load_persisted_opts.
+          await fetch('/api/tailscale/logout', {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+          await fetch('/api/tailscale/up', {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+          _tsStartPolling();
+          loadTailscaleConnection();
+        }
+      }
+    }catch(_){}
   }catch(e){
     if(status) status.textContent = 'Network error.';
   }

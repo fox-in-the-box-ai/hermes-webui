@@ -87,11 +87,17 @@ function renderStep1() {
   if (state.ollama && state.ollama.running && Array.isArray(state.ollama.models) && state.ollama.models.length > 0) {
     const first = state.ollama.models[0];
     const modelName = escapeHtml(first.name || '');
+    // SECURITY (#XSS-1): never interpolate model names into a JS string
+    // context inside an `onclick` attribute. escapeHtml() is HTML-attribute-
+    // safe but does not safely escape JS string literals (a model name with
+    // backslash + apostrophe could break out). Use a data attribute and a
+    // delegated click handler — a tampered Ollama daemon could otherwise
+    // trigger code injection in the wizard.
     localBlock = `
       <div class="ollama-detected">
         <div class="ollama-detected-title">Local model detected</div>
         <p>You have <code>${modelName}</code> running on your computer via Ollama. Skip the API key step and chat with it locally — your data never leaves your machine.</p>
-        <button class="btn btn-secondary" onclick="useLocalOllama('${escapeHtml(first.name || '')}')">Use ${modelName}</button>
+        <button class="btn btn-secondary" data-action="use-ollama" data-model="${modelName}">Use ${modelName}</button>
       </div>
     `;
   } else if (state.localFallback
@@ -118,13 +124,22 @@ function renderStep1() {
     }
   }
 
+  // QA fix: disable Next while probes are in flight (state.ollama and
+  // state.localFallback are still null). Otherwise a fast user can skip
+  // past Step 1 before the local-model fast-paths render, missing them
+  // entirely. Once any probe resolves we re-render with the button enabled.
+  const probesPending = state.ollama === null && state.localFallback === null;
+  const nextBtn = probesPending
+    ? `<button class="btn btn-primary" disabled><span class="spinner"></span> Detecting local options…</button>`
+    : `<button class="btn btn-primary" onclick="advance(2)">Next</button>`;
+
   return `
     <div class="step">
       <h1>Fox in the Box</h1>
       ${body}
       ${localBlock}
       <div class="btn-actions">
-        <button class="btn btn-primary" onclick="advance(2)">Next</button>
+        ${nextBtn}
       </div>
       ${skipFooter()}
     </div>
@@ -162,7 +177,7 @@ function renderStep3() {
         <li>Local: <code>http://localhost:8787</code></li>
       </ul>
       <div class="btn-actions">
-        <button id="open-fox" class="btn btn-primary" onclick="completSetup()">Open Fox</button>
+        <button id="open-fox" class="btn btn-primary" onclick="completeSetup()">Open Fox</button>
       </div>
     </div>
   `;
@@ -332,9 +347,17 @@ function _renderLocalFallbackProgress(snapshot) {
       showBar = false;
   }
 
-  const bar = showBar
-    ? `<div class="dl-bar"><div class="dl-bar-fill" style="width:${pct}%"></div></div>`
-    : '';
+  // QA fix: when bytes_total is unknown, the bar previously rendered
+  // as a 0%-fill and looked frozen. Use an indeterminate animated
+  // stripe instead so the user knows progress is happening.
+  let bar = '';
+  if (showBar) {
+    if (total > 0) {
+      bar = `<div class="dl-bar"><div class="dl-bar-fill" style="width:${pct}%"></div></div>`;
+    } else {
+      bar = `<div class="dl-bar dl-bar-indeterminate"><div class="dl-bar-fill"></div></div>`;
+    }
+  }
 
   container.innerHTML = `
     <div class="step">
@@ -394,7 +417,7 @@ async function useLlamaCppFallback() {
 
 // ── Complete setup ───────────────────────────────────────────────────────────
 
-async function completSetup() {
+async function completeSetup() {
   const btn = document.getElementById('open-fox');
   if (btn) {
     btn.disabled = true;
@@ -448,12 +471,29 @@ async function loadOnboardingState() {
   await Promise.all(tasks);
 }
 
+// Delegated click handler for data-action buttons. Avoids inline onclick=
+// strings that interpolate user-controlled values (model names from a
+// remote Ollama daemon, etc.). Bound once at module init.
+document.addEventListener('click', (ev) => {
+  const t = ev.target;
+  if (!t || t.nodeType !== 1) return;
+  const btn = t.closest('[data-action]');
+  if (!btn) return;
+  const action = btn.getAttribute('data-action');
+  if (action === 'use-ollama') {
+    useLocalOllama(btn.getAttribute('data-model') || '');
+  }
+});
+
 document.addEventListener('DOMContentLoaded', async () => {
   // Show the welcome step immediately with hardcoded fallback content,
   // then re-render once the probes return so the user never sees a
   // blank screen if the API is slow.
   renderStep(1);
   updateProgress(1);
+  // QA fix: disable Next while probes are in flight so a fast user can't
+  // skip past Step 1 with no `state.ollama` / `state.localFallback`
+  // populated and miss the local-model fast-paths.
   await loadOnboardingState();
   if (state.currentStep === 1) renderStep(1);
 });

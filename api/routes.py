@@ -3160,7 +3160,16 @@ def handle_post(handler, parsed) -> bool:
             and body.get("_set_password", "").strip()
         )
 
-        saved = save_settings(body)
+        try:
+            saved = save_settings(body)
+        except ValueError as exc:
+            # QA fix v0.4.7-WaveF: save_settings raises ValueError when the
+            # Tailscale validator (or any future validator) rejects a key.
+            # Without this catch the exception propagated to do_POST's
+            # catch-all and the user saw "HTTP 500: Internal server error"
+            # instead of the validator's specific reason. Return 400 with
+            # the error message so the Settings UI can surface it inline.
+            return bad(handler, str(exc), 400)
         saved.pop("password_hash", None)  # never expose hash to client
 
         auth_enabled_after = is_auth_enabled()

@@ -75,10 +75,17 @@
 
   function closeNode(n) { if (n && n.parentNode) n.parentNode.removeChild(n); }
 
+  // Module-level guard against duplicate concurrent renders. sessionStorage
+  // is the cross-error/cross-reload guard; this is a tighter "is one open
+  // RIGHT NOW in this tab" guard so two stream-errors firing 50ms apart
+  // don't stack.
+  let _modalOpen = false;
+
   async function showReactiveModal() {
     if (sessionStorage.getItem(MODAL_DISMISSED)) return;
-    if (document.querySelector('.fitb-fb-modal-backdrop')) return;  // already open
-    sessionStorage.setItem(MODAL_DISMISSED, '1');  // mark immediately so duplicates don't queue
+    if (_modalOpen) return;
+    if (document.querySelector('.fitb-fb-modal-backdrop')) return;  // safety
+    _modalOpen = true;
 
     const wrap = buildModal();
     document.body.appendChild(wrap);
@@ -87,20 +94,44 @@
     const dismiss = wrap.querySelector('#fitbFbModalDismiss');
     const status = wrap.querySelector('#fitbFbModalStatus');
 
-    dismiss.addEventListener('click', () => closeNode(wrap));
+    // QA fix v0.4.7-WaveF: removeEventListener inside closeAndDismiss too,
+    // not just inside the Escape handler. Otherwise Dismiss/Enable paths
+    // leave a `keydown` listener attached with a closed-over `wrap` node
+    // for the rest of the session.
+    const closeAndDismiss = (markSeen) => {
+      _modalOpen = false;
+      if (markSeen) sessionStorage.setItem(MODAL_DISMISSED, '1');
+      document.removeEventListener('keydown', onKey);
+      closeNode(wrap);
+    };
+
+    const onKey = (e) => {
+      if (e.key === 'Escape') closeAndDismiss(true);
+    };
+    document.addEventListener('keydown', onKey);
+
+    dismiss.addEventListener('click', () => closeAndDismiss(true));
     enable.addEventListener('click', async () => {
       enable.disabled = true;
       dismiss.disabled = true;
       status.textContent = 'Enabling…';
       const r = await postJson('/api/local-fallback/enable', {});
       if (!r.ok || !r.data || r.data.enabled === false) {
+        // QA fix: previously sessionStorage MODAL_DISMISSED was set on entry,
+        // so a failed enable left the modal locked-out for the rest of the
+        // session even though the user never successfully enabled. Now we
+        // only mark dismissed on explicit dismiss or success path — failure
+        // re-enables the buttons so the user can retry.
         status.textContent = (r.data && r.data.error) || 'Failed to enable.';
         enable.disabled = false;
         dismiss.disabled = false;
         return;
       }
       status.textContent = 'Enabled. Your next failure will silently use local.';
-      setTimeout(() => closeNode(wrap), 1500);
+      // Recovery banner can now start polling — it boots its own poll loop
+      // by listening for storage events would be complex, so we just nudge
+      // the next page load to start it. For this session, that's fine.
+      setTimeout(() => closeAndDismiss(true), 1500);
     });
   }
 
@@ -177,6 +208,15 @@
       stopRecoveryPolling();
       return;
     }
+    // QA fix: previously this kept polling forever even after the banner
+    // was visible — a 90s heartbeat to the probe URLs for the lifetime
+    // of the open tab. Once the banner is up, polling has no purpose
+    // until the user dismisses or switches; the dismiss/switch handlers
+    // restart polling if appropriate.
+    if (_bannerNode) {
+      stopRecoveryPolling();
+      return;
+    }
     let s;
     try {
       s = await fetchJson('/api/local-fallback/status');
@@ -198,6 +238,7 @@
     }
     if (h && h.remote_healthy) {
       showRecoveryBanner();
+      return;  // showRecoveryBanner sets _bannerNode; next-tick guard kicks in
     }
     _recoveryPollTimer = setTimeout(recoveryTick, RECOVERY_POLL_MS);
   }

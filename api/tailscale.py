@@ -89,27 +89,148 @@ _POWER_USER_KEYS = (
     "tailscale_exit_node",
 )
 
+# QA fix: defense-in-depth validators for the power-user fields. Without
+# these, anything posted to /api/settings flows straight into `tailscale up`
+# argv as `--flag=value`. Even though subprocess.run uses shell=False (so
+# no classic shell injection), an attacker who controls settings.json can:
+#   - prefix a value with `-` to inject another flag (e.g. break advertise
+#     into `... --auth-key=tskey-xxx`)
+#   - use `--login-server` to redirect a user's auth flow to attacker-
+#     controlled headscale
+#   - smuggle newlines / control characters
+# Validators reject malformed input at both /api/settings save time AND at
+# argv build time (belt and suspenders).
+_MAX_OPT_LEN = 512
+_TS_HOSTNAME_RE = __import__("re").compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+_TS_TAG_RE = __import__("re").compile(r"^tag:[a-z][a-z0-9-]*$")
+_TS_ROUTE_RE = __import__("re").compile(
+    r"^(?:\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}|[0-9a-fA-F:]+/\d{1,3})$"
+)
+# Hostname / IP charset for --exit-node. Drop `/` (was a copy-paste from
+# the URL regex; exit-node values never contain `/`).
+_TS_HOST_RE = __import__("re").compile(r"^[a-zA-Z0-9.\-_:]+$")
+_TS_URL_RE = __import__("re").compile(r"^https?://[a-zA-Z0-9.\-_:/]+(?:/[a-zA-Z0-9.\-_:/?&=%~]*)?$")
+
+
+def _safe_str_value(v: Any, max_len: int = _MAX_OPT_LEN) -> str | None:
+    """Return v as a stripped string if it's safe to pass through to a
+    `tailscale up --flag=value` argument: not too long, no control chars,
+    no leading dash. Returns None if the value should be rejected."""
+    if v is None:
+        return ""
+    if not isinstance(v, str):
+        return None
+    s = v.strip()
+    if not s:
+        return ""
+    if len(s) > max_len:
+        return None
+    if s.startswith("-"):
+        return None  # blocks flag-injection
+    if any(ord(c) < 0x20 for c in s):
+        return None  # newlines, NUL, etc.
+    return s
+
+
+def _validate_ts_opt(field: str, value: Any) -> tuple[bool, str]:
+    """Return ``(ok, sanitized_or_error_msg)``. Used by both
+    save_settings (settings.json gate) and _build_up_argv (argv gate)."""
+    s = _safe_str_value(value)
+    if s is None:
+        return False, f"{field}: invalid characters or too long"
+    if not s:
+        return True, ""
+
+    if field == "login_server":
+        if not _TS_URL_RE.match(s):
+            return False, "login_server must be an http(s) URL"
+        return True, s
+    if field == "advertise_routes":
+        # comma-separated CIDRs
+        for part in (p.strip() for p in s.split(",")):
+            if not part:
+                continue
+            if not _TS_ROUTE_RE.match(part):
+                return False, f"advertise_routes: '{part}' is not a CIDR"
+        return True, s
+    if field == "advertise_tags":
+        for part in (p.strip() for p in s.split(",")):
+            if not part:
+                continue
+            if not _TS_TAG_RE.match(part):
+                return False, f"advertise_tags: '{part}' is not a tag:* string"
+        return True, s
+    if field == "exit_node":
+        # IP, hostname, or magic-DNS name
+        if not _TS_HOST_RE.match(s):
+            return False, "exit_node: invalid characters"
+        return True, s
+    if field == "hostname":
+        if not _TS_HOSTNAME_RE.match(s):
+            return False, "hostname: must match RFC 1035 label form"
+        return True, s
+    return True, s
+
+
+def validate_settings_dict(settings: dict) -> str | None:
+    """Used by api/config.save_settings to reject malformed Tailscale
+    power-user values BEFORE they hit settings.json. Returns an error
+    message string, or None if the dict is clean."""
+    field_map = {
+        "tailscale_login_server": "login_server",
+        "tailscale_advertise_routes": "advertise_routes",
+        "tailscale_advertise_tags": "advertise_tags",
+        "tailscale_exit_node": "exit_node",
+    }
+    for k, vfield in field_map.items():
+        if k not in settings:
+            continue
+        ok, msg = _validate_ts_opt(vfield, settings[k])
+        if not ok:
+            return msg
+    return None
+
 
 def _load_persisted_opts() -> dict[str, Any]:
-    """Read the six power-user Tailscale flags from settings.json (#96
-    phase 2). Returns the body shape `_build_up_argv()` expects:
-      {login_server, advertise_routes, advertise_tags, accept_routes,
-       accept_dns, exit_node}
-    Missing values fall back to settings defaults (empty / false / true).
+    """Read the seven persisted Tailscale flags. Returns the body shape
+    `_build_up_argv()` expects:
+      {hostname, login_server, advertise_routes, advertise_tags,
+       accept_routes, accept_dns, exit_node}
+
+    QA fix: previously we did NOT include hostname here, so a saved
+    FOX_HOSTNAME (from #44 / Settings → Hostname) was dropped on every
+    Reconnect — the user got a Tailscale-default name (often the
+    container ID) instead of the friendly fox-<adjective> they picked.
+    Hostname is read from /data/config/hermes.env via the existing #44
+    helper, NOT from settings.json — that's where install.sh, the wizard
+    modal, and the Settings tile all converge.
     """
+    out = {
+        "hostname": "",
+        "login_server": "",
+        "advertise_routes": "",
+        "advertise_tags": "",
+        "accept_routes": False,
+        "accept_dns": True,
+        "exit_node": "",
+    }
     try:
         from api.config import load_settings
         s = load_settings()
+        out["login_server"] = s.get("tailscale_login_server") or ""
+        out["advertise_routes"] = s.get("tailscale_advertise_routes") or ""
+        out["advertise_tags"] = s.get("tailscale_advertise_tags") or ""
+        out["accept_routes"] = bool(s.get("tailscale_accept_routes", False))
+        out["accept_dns"] = bool(s.get("tailscale_accept_dns", True))
+        out["exit_node"] = s.get("tailscale_exit_node") or ""
     except Exception:
-        return {}
-    return {
-        "login_server": s.get("tailscale_login_server") or "",
-        "advertise_routes": s.get("tailscale_advertise_routes") or "",
-        "advertise_tags": s.get("tailscale_advertise_tags") or "",
-        "accept_routes": bool(s.get("tailscale_accept_routes", False)),
-        "accept_dns": bool(s.get("tailscale_accept_dns", True)),
-        "exit_node": s.get("tailscale_exit_node") or "",
-    }
+        pass
+    try:
+        from api.hostname import _read_configured_hostname
+        out["hostname"] = _read_configured_hostname() or ""
+    except Exception:
+        pass
+    return out
 
 
 def get_status() -> dict[str, Any]:
@@ -175,36 +296,75 @@ _up_state: dict[str, Any] = {
     "started_at": 0.0,
     "ended_at": 0.0,
     "error": "",
+    "attempt_id": 0,
 }
+# QA fix: previously _up_proc and _up_log were module-level globals
+# mutated outside _up_lock, with the daemon thread reading the *current*
+# global rather than its own captured handle. That caused several races:
+#   - logout() did not kill an in-flight subprocess
+#   - start_up() observed a half-torn-down Popen as "in flight" and
+#     silently swallowed the user's click
+#   - a fresh _up_subprocess overwrote _up_proc while the previous thread
+#     still had .wait() pending on the old reference
+# All shared state now lives in this attempt object, captured-by-reference
+# inside the daemon thread so each thread operates on its own handle.
 _up_proc: subprocess.Popen | None = None
 _up_log: list[str] = []
 
 
-def _set_up_state(**fields) -> None:
+def _set_up_state(attempt_id: int | None = None, **fields) -> None:
+    """Update the shared state dict. If attempt_id is provided, the update
+    is silently ignored when it doesn't match the current attempt — this
+    is how stale daemon threads (from cancelled/superseded attempts)
+    avoid clobbering the active attempt's state."""
     with _up_lock:
+        if attempt_id is not None and attempt_id != _up_state.get("attempt_id"):
+            return
         _up_state.update(fields)
 
 
 def _build_up_argv(opts: dict) -> list[str]:
     """Translate the request body into `tailscale up` flags. All keys are
-    optional. Hostname is the only flag we always pass — the rest are
-    user-supplied power-user knobs (Phase 2 will expose them in the UI).
-    """
-    argv = ["tailscale", "up", f"--timeout={int(_UP_TIMEOUT_S)}s"]
+    optional. Each value passes through `_validate_ts_opt` first — silently
+    dropped if invalid (the request-time gate already rejected at /settings
+    save; this is defense in depth for the case where settings.json was
+    edited by hand or a future code path bypasses the gate).
 
-    hostname = (opts.get("hostname") or "").strip()
+    QA fix v0.4.7: in FITB the Tailscale daemon runs as root (for
+    NET_ADMIN) and the webui runs as `foxinthebox` (per supervisord).
+    entrypoint.sh runs `tailscale set --operator=foxinthebox` after
+    boot to delegate user-mode CLI access — but Tailscale's `up`
+    semantics require any non-default preference to be re-stated on
+    every invocation, otherwise it errors with "changing settings via
+    'tailscale up' requires mentioning all non-default flags".
+    Including --operator=foxinthebox unconditionally keeps `up` working
+    no matter what other prefs are sticky on the daemon. Without this,
+    the entire desktop Tailscale flow (#96) silently 1-exits with
+    'Access denied: login access denied' — bug surfaced in v0.4.7 QA.
+    """
+    argv = [
+        "tailscale", "up",
+        "--operator=foxinthebox",
+        f"--timeout={int(_UP_TIMEOUT_S)}s",
+    ]
+
+    def _safe(field: str) -> str:
+        ok, sanitized = _validate_ts_opt(field, opts.get(field, ""))
+        return sanitized if ok else ""
+
+    hostname = _safe("hostname")
     if hostname:
         argv.append(f"--hostname={hostname}")
 
-    login_server = (opts.get("login_server") or "").strip()
+    login_server = _safe("login_server")
     if login_server:
         argv.append(f"--login-server={login_server}")
 
-    advertise_routes = (opts.get("advertise_routes") or "").strip()
+    advertise_routes = _safe("advertise_routes")
     if advertise_routes:
         argv.append(f"--advertise-routes={advertise_routes}")
 
-    advertise_tags = (opts.get("advertise_tags") or "").strip()
+    advertise_tags = _safe("advertise_tags")
     if advertise_tags:
         argv.append(f"--advertise-tags={advertise_tags}")
 
@@ -214,7 +374,7 @@ def _build_up_argv(opts: dict) -> list[str]:
     if opts.get("accept_dns") is False:
         argv.append("--accept-dns=false")
 
-    exit_node = (opts.get("exit_node") or "").strip()
+    exit_node = _safe("exit_node")
     if exit_node:
         argv.append(f"--exit-node={exit_node}")
 
@@ -232,14 +392,31 @@ def _scrape_auth_url(line: str) -> str:
     return m.group(0) if m else ""
 
 
-def _up_subprocess(argv: list[str], env: dict | None) -> None:
+def _up_subprocess(argv: list[str], env: dict | None, attempt_id: int) -> None:
     """Daemon thread: spawn `tailscale up`, scrape stdout for the auth URL,
     keep the process alive until it exits (user finished auth) or until
-    the timeout."""
+    the timeout.
+
+    QA fixes vs. the v0.4.4 implementation:
+      - All Popen / stdout / wait operations go through the LOCAL `proc`
+        variable, never the module global. A second start_up() that
+        spawns its own thread cannot make this thread `.wait()` on the
+        new subprocess.
+      - _set_up_state takes the attempt_id; if a newer attempt has
+        started, our terminal mutations are silently dropped instead of
+        clobbering it.
+      - readline() is wrapped in a non-blocking poll using select() so
+        the deadline check fires even when the subprocess goes silent
+        (your known bug #1 — readline could block past the deadline).
+      - All access to the shared _up_log / _up_proc globals is under
+        _up_lock.
+    """
     global _up_proc
+    import select
+
     deadline = time.time() + _UP_TIMEOUT_S
     try:
-        _up_proc = subprocess.Popen(
+        proc = subprocess.Popen(
             argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -247,37 +424,107 @@ def _up_subprocess(argv: list[str], env: dict | None) -> None:
             env=env,
         )
     except FileNotFoundError:
-        _set_up_state(state="failed", error="tailscale CLI not found", ended_at=time.time())
+        _set_up_state(attempt_id, state="failed", error="tailscale CLI not found", ended_at=time.time())
         return
     except OSError as exc:
-        _set_up_state(state="failed", error=f"failed to spawn tailscale up: {exc}", ended_at=time.time())
+        _set_up_state(attempt_id, state="failed", error=f"failed to spawn tailscale up: {exc}", ended_at=time.time())
         return
 
+    # Publish the proc so logout() can SIGKILL it.
+    with _up_lock:
+        _up_proc = proc
+        _up_log.clear()
+
+    # QA fix v0.4.7-WaveG: scrape the auth URL from `tailscale status
+    # --json`'s AuthURL field, NOT from the subprocess's stdout. Tailscale
+    # block-buffers stdout when not attached to a TTY, so the URL line
+    # never reaches Python until the subprocess exits — meanwhile the
+    # daemon already knows the URL and exposes it in status. Polling
+    # status every second also gives us a clean way to detect the
+    # awaiting-auth → Running transition without depending on subprocess
+    # behavior.
     auth_url = ""
+    stdout = proc.stdout
+    POLL_INTERVAL = 1.0
+
     while True:
+        # Deadline check fires every loop iteration regardless of subprocess
+        # output. We don't read from stdout at all — the subprocess just
+        # needs to stay alive while the user authenticates in the browser.
         if time.time() > deadline:
             try:
-                _up_proc.kill()
+                proc.kill()
             except Exception:
                 pass
-            _set_up_state(state="failed", error="auth timed out before completion", ended_at=time.time())
-            return
-        if _up_proc.stdout is None:
+            _set_up_state(attempt_id, state="failed", error="auth timed out before completion", ended_at=time.time())
             break
-        line = _up_proc.stdout.readline()
-        if not line:
-            # EOF — process exited
-            break
-        line = line.rstrip()
-        _up_log.append(line)
-        if not auth_url:
-            url = _scrape_auth_url(line)
-            if url:
-                auth_url = url
-                _set_up_state(state="awaiting-auth", auth_url=url)
 
-    rc = _up_proc.wait()
-    _up_proc = None
+        # Was the attempt superseded?
+        with _up_lock:
+            if _up_state.get("attempt_id") != attempt_id:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                break
+
+        # Subprocess exited? — drop out of the polling loop and let the
+        # rc-handling block below decide running/failed.
+        if proc.poll() is not None:
+            break
+
+        # Probe daemon status for the auth URL or terminal Running state.
+        st = get_status()
+        bs = st.get("backend_state", "")
+        # The daemon exposes AuthURL on the raw status JSON. get_status()
+        # doesn't surface it (UI doesn't need it), so peek directly.
+        if not auth_url:
+            try:
+                rc, out, _err = _run_tailscale(["status", "--json"], timeout=3.0)
+                if rc == 0 and out:
+                    raw = json.loads(out)
+                    candidate = raw.get("AuthURL") or ""
+                    if candidate:
+                        auth_url = candidate
+                        _set_up_state(attempt_id, state="awaiting-auth", auth_url=candidate)
+            except Exception:
+                pass
+
+        # Promote to running as soon as the daemon reports it — kills the
+        # `tailscale up` subprocess promptly so the rc=0 / configure_serve
+        # path runs.
+        if bs == "Running":
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            break
+
+        # Drain any subprocess stdout into the log without blocking — useful
+        # for diagnostics on failed attempts. This is best-effort: select()
+        # avoids blocking, the buffered-text issue means we may not see
+        # everything in real time, but we still get partial diagnostic
+        # context for the failure-tail in the next block.
+        if stdout is not None:
+            try:
+                ready, _, _ = select.select([stdout], [], [], 0.0)
+                if ready:
+                    line = stdout.readline()
+                    if line:
+                        with _up_lock:
+                            _up_log.append(line.rstrip())
+            except (ValueError, OSError):
+                pass
+
+        time.sleep(POLL_INTERVAL)
+
+    rc = proc.wait()
+
+    # Clear the global handle ONLY if it's still pointing at our proc —
+    # avoid stomping a newer attempt's handle.
+    with _up_lock:
+        if _up_proc is proc:
+            _up_proc = None
 
     # rc=0 means tailscale up returned successfully — for interactive flows
     # this happens after the user clicks through; for auth-key flows it's
@@ -287,48 +534,83 @@ def _up_subprocess(argv: list[str], env: dict | None) -> None:
     if rc == 0:
         st = get_status()
         if st.get("backend_state") == "Running":
-            _set_up_state(state="running", ended_at=time.time())
+            _set_up_state(attempt_id, state="running", ended_at=time.time())
+            # QA fix v0.4.7-WaveF: gate the Serve auto-config on still-
+            # being-the-active-attempt at call time. If logout() ran
+            # between the rc=0 check and this point, attempt_id has
+            # been bumped and we'd otherwise re-establish a Serve
+            # binding against a tunnel the user just disconnected.
+            with _up_lock:
+                still_current = (_up_state.get("attempt_id") == attempt_id and
+                                 _up_state.get("state") == "running")
+            if still_current:
+                try:
+                    configure_serve()
+                except Exception:
+                    logger.debug("Auto-configure Serve after Running failed", exc_info=True)
         else:
             # Edge case: rc=0 but daemon not Running (e.g. login-only mode).
             # Treat as failed so UI re-prompts.
             _set_up_state(
+                attempt_id,
                 state="failed",
                 error=f"tailscale up exited 0 but BackendState={st.get('backend_state')}",
                 ended_at=time.time(),
             )
     else:
-        tail = "\n".join(_up_log[-10:]) or "(no output)"
-        _set_up_state(state="failed", error=f"tailscale up exited {rc}: {tail}", ended_at=time.time())
+        with _up_lock:
+            tail = "\n".join(_up_log[-10:]) or "(no output)"
+        _set_up_state(attempt_id, state="failed", error=f"tailscale up exited {rc}: {tail}", ended_at=time.time())
 
 
 def start_up(opts: dict) -> dict[str, Any]:
     """POST /api/tailscale/up — spawn `tailscale up` in the background.
 
-    If a previous attempt is still in flight (state=starting or
-    awaiting-auth) AND not stale, we return the in-flight state instead
-    of starting a new subprocess. This keeps Connect idempotent across
-    retries / refreshes.
+    Idempotency: if a previous attempt is still in flight (state=starting
+    or awaiting-auth) AND its subprocess is still alive AND not stale, we
+    return the in-flight state instead of starting a new one.
+
+    QA fix vs v0.4.4: all _up_proc / _up_log / _up_state mutations happen
+    under _up_lock; the daemon thread is identified by an attempt_id so
+    a stale thread cannot stomp the active attempt's state when it
+    eventually exits. We also actively kill the previous proc before
+    spawning a new one — required when state was already terminal
+    (failed/running) and the user is retrying.
     """
-    global _up_proc, _up_log
+    global _up_proc
+    new_attempt_id: int
     with _up_lock:
         cur_state = _up_state["state"]
         if cur_state in ("starting", "awaiting-auth"):
             stale = (time.time() - _up_state["started_at"]) > _UP_TIMEOUT_S
-            if not stale and _up_proc is not None and _up_proc.poll() is None:
+            alive = _up_proc is not None and _up_proc.poll() is None
+            if not stale and alive:
                 return {
                     "ok": True,
                     "reused": True,
                     "auth_url": _up_state["auth_url"],
                     "state": cur_state,
                 }
-        # Reset state for a fresh attempt
-        _up_log = []
+        # Bump attempt id so any stale thread's terminal _set_up_state
+        # is silently dropped.
+        new_attempt_id = int(_up_state.get("attempt_id", 0)) + 1
+        # Kill any still-running proc from a previous attempt (e.g. user
+        # is retrying after a stuck `awaiting-auth`). Best-effort.
+        if _up_proc is not None:
+            try:
+                if _up_proc.poll() is None:
+                    _up_proc.kill()
+            except Exception:
+                pass
+            _up_proc = None
+        _up_log.clear()
         _up_state.update({
             "state": "starting",
             "auth_url": "",
             "started_at": time.time(),
             "ended_at": 0.0,
             "error": "",
+            "attempt_id": new_attempt_id,
         })
 
     # Merge persisted power-user settings (#96 phase 2) with body opts —
@@ -351,7 +633,10 @@ def start_up(opts: dict) -> dict[str, Any]:
         env = dict(os.environ)
         env["TS_AUTHKEY"] = auth_key
 
-    threading.Thread(target=_up_subprocess, args=(argv, env), name="tailscale-up", daemon=True).start()
+    threading.Thread(
+        target=_up_subprocess, args=(argv, env, new_attempt_id),
+        name=f"tailscale-up-{new_attempt_id}", daemon=True,
+    ).start()
 
     # Auth-key path is non-interactive; client doesn't need an auth_url.
     # Return immediately — the polling endpoint will tell the client when
@@ -380,7 +665,13 @@ def get_up_progress() -> dict[str, Any]:
     if snap["state"] in ("starting", "awaiting-auth"):
         st = get_status()
         if st.get("backend_state") == "Running":
-            _set_up_state(state="running", ended_at=time.time())
+            # QA fix v0.4.7-WaveF: pass the snapshot's attempt_id into
+            # _set_up_state so a stale poll cannot stomp a concurrent
+            # logout()'s reset-to-idle. Without the attempt_id, the
+            # guard inside _set_up_state would fall through and write
+            # state="running" over freshly-cleared idle, bringing back
+            # the "Connected" badge after the user explicitly disconnected.
+            _set_up_state(snap.get("attempt_id"), state="running", ended_at=time.time())
             with _up_lock:
                 snap = dict(_up_state)
     return {
@@ -394,9 +685,52 @@ def get_up_progress() -> dict[str, Any]:
 
 def logout() -> dict[str, Any]:
     """POST /api/tailscale/logout — disconnect from the tailnet. Resets
-    the up-state machine so the next Connect starts fresh."""
+    the up-state machine so the next Connect starts fresh.
+
+    QA fixes:
+      - Kill any in-flight `tailscale up` subprocess so it can't flip the
+        state machine back to running/failed after the user logged out.
+        Without this, an orphaned auth flow could complete in the
+        background and the badge would say "Connected" minutes after
+        the user explicitly disconnected.
+      - Bump attempt_id so any still-running daemon thread's terminal
+        state mutation is silently dropped.
+      - Clear `tailscale serve` config (best-effort) — leaving a
+        Serve binding pointing at a now-disconnected tunnel produces
+        confusing UX on the next reconnect under a different tailnet
+        identity.
+    """
+    global _up_proc
+    with _up_lock:
+        # Bump attempt id first so any in-flight thread's terminal mutate
+        # gets dropped.
+        _up_state["attempt_id"] = int(_up_state.get("attempt_id", 0)) + 1
+        if _up_proc is not None:
+            try:
+                if _up_proc.poll() is None:
+                    _up_proc.kill()
+            except Exception:
+                pass
+            _up_proc = None
+        _up_state.update({
+            "state": "idle",
+            "auth_url": "",
+            "error": "",
+            "started_at": 0.0,
+            "ended_at": 0.0,
+        })
+
+    # Reset Tailscale Serve config best-effort. `tailscale serve reset`
+    # exists on recent builds; older builds use `tailscale serve / off`
+    # (NOT `--remove` — that's never been a valid flag). Worst case:
+    # neither succeeds and a stale Serve binding auto-reattaches on
+    # next Running tunnel via `configure_serve()`'s post-Running call.
+    for args in (["serve", "reset"], ["serve", "/", "off"]):
+        rc, _o, _e = _run_tailscale(args, timeout=5.0)
+        if rc == 0:
+            break
+
     rc, _out, err = _run_tailscale(["logout"], timeout=15.0)
-    _set_up_state(state="idle", auth_url="", error="", started_at=0.0, ended_at=0.0)
     if rc != 0:
         return {"ok": False, "error": err.strip() or f"tailscale logout exited {rc}"}
     return {"ok": True}
