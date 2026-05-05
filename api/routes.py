@@ -1678,6 +1678,10 @@ def handle_get(handler, parsed) -> bool:
         from api.local_fallback import handle_get_status
         return j(handler, handle_get_status(handler))
 
+    if parsed.path == "/api/local-fallback/remote-health":
+        from api.local_fallback import handle_get_remote_health
+        return j(handler, handle_get_remote_health(handler))
+
     # ── Tailscale (GET) — issue #96 ──
     if parsed.path == "/api/tailscale/status":
         from api.tailscale import handle_get_status as handle_ts_get_status
