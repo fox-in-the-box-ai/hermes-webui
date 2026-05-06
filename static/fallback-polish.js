@@ -20,6 +20,10 @@
   'use strict';
 
   const MODAL_DISMISSED = 'fitb.fallback_modal_seen';
+  // FITB#129d: separate dismiss flag for the download-confirm modal so
+  // declining "download local model" doesn't also lock out the regular
+  // "enable fallback" reactive modal (or vice versa).
+  const UNPREPARED_DISMISSED = 'fitb.local_unprepared_dismissed';
   const BANNER_DISMISSED = 'fitb.recovery_banner_dismissed';
   const RECOVERY_POLL_MS = 90 * 1000;
   // Error types the modal reacts to. The original logic excluded auth /
@@ -237,6 +241,133 @@
     showReactiveModal();
   }
 
+  // ── FITB#129d: download-on-demand modal for unprepared local fallback ──
+
+  function _formatBytes(n) {
+    if (!n || n <= 0) return '';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return (n < 10 ? n.toFixed(1) : Math.round(n)) + ' ' + units[i];
+  }
+
+  let _unpreparedNode = null;
+  let _unpreparedPollTimer = null;
+
+  async function showUnpreparedDownloadModal(detail) {
+    if (_modalOpen) return;
+    if (_unpreparedNode) return;
+
+    const reason = (detail && detail.reason) || 'unknown';
+    const sizeBytes = (detail && detail.model_size_bytes) || 0;
+    const sizeStr = sizeBytes ? ' (~' + _formatBytes(sizeBytes) + ')' : '';
+
+    const wrap = document.createElement('div');
+    wrap.className = 'fitb-fb-modal-backdrop';
+    wrap.innerHTML = `
+      <div class="fitb-fb-modal" role="dialog" aria-modal="true" aria-labelledby="fitbUnprepTitle">
+        <div class="fitb-fb-modal-title" id="fitbUnprepTitle">Download local model to keep working</div>
+        <div class="fitb-fb-modal-body">Your cloud provider failed (${escapeHtml(reason)}). Local fallback is enabled but the model isn't downloaded yet. Download Phi-4-mini${escapeHtml(sizeStr)} to chat without the cloud — your data stays on this machine.</div>
+        <div class="fitb-fb-modal-status" id="fitbUnprepStatus"></div>
+        <div class="fitb-fb-modal-actions">
+          <button type="button" class="fitb-btn fitb-btn-link" id="fitbUnprepDismiss">Not now</button>
+          <button type="button" class="fitb-btn fitb-btn-primary" id="fitbUnprepDownload">Download &amp; continue</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(wrap);
+    _unpreparedNode = wrap;
+    _modalOpen = true;
+
+    const downloadBtn = wrap.querySelector('#fitbUnprepDownload');
+    const dismissBtn = wrap.querySelector('#fitbUnprepDismiss');
+    const status = wrap.querySelector('#fitbUnprepStatus');
+
+    const dismiss = (markSeen) => {
+      _modalOpen = false;
+      _unpreparedNode = null;
+      if (_unpreparedPollTimer) { clearTimeout(_unpreparedPollTimer); _unpreparedPollTimer = null; }
+      document.removeEventListener('keydown', onKey);
+      if (markSeen) sessionStorage.setItem(UNPREPARED_DISMISSED, '1');
+      closeNode(wrap);
+    };
+
+    const onKey = (e) => { if (e.key === 'Escape') dismiss(true); };
+    document.addEventListener('keydown', onKey);
+    dismissBtn.addEventListener('click', () => dismiss(true));
+
+    downloadBtn.addEventListener('click', async () => {
+      downloadBtn.disabled = true;
+      dismissBtn.disabled = true;
+      status.textContent = 'Starting download…';
+
+      // Kick off the download — /enable starts the supervisord-managed
+      // download via #10's manager and returns the current snapshot.
+      let snap;
+      try {
+        const r = await postJson('/api/local-fallback/enable', {});
+        if (!r.ok || !r.data) {
+          status.textContent = 'Could not start the download. Check Settings → Providers.';
+          dismissBtn.disabled = false;
+          return;
+        }
+        snap = r.data;
+      } catch (e) {
+        status.textContent = 'Network error starting the download.';
+        dismissBtn.disabled = false;
+        return;
+      }
+
+      // Poll status until ready (or failure). Same UI loop pattern the
+      // wizard uses for #69's bundled-llama.cpp progress.
+      const tick = async () => {
+        let s;
+        try {
+          s = await fetchJson('/api/local-fallback/status');
+        } catch (e) {
+          _unpreparedPollTimer = setTimeout(tick, 2500);
+          return;
+        }
+        const ms = (s && s.model_state) || {};
+        const downloaded = ms.bytes_downloaded || 0;
+        const total = ms.bytes_total || s.model_size_bytes || 0;
+        const pct = total > 0 ? Math.min(100, Math.floor((downloaded / total) * 100)) : 0;
+        const ui = s.ui_state || '';
+        if (ui === 'downloading') {
+          status.textContent = total > 0
+            ? `Downloading… ${_formatBytes(downloaded)} / ${_formatBytes(total)} (${pct}%)`
+            : `Downloading… ${_formatBytes(downloaded)}`;
+        } else if (ui === 'starting' || ui === 'warming') {
+          status.textContent = 'Starting local model…';
+        } else if (ui === 'ready' || s.ready) {
+          status.textContent = 'Activating…';
+          // Flip the gateway's active model to local now that it's ready.
+          try {
+            const r = await postJson('/api/local-fallback/activate', {});
+            if (r.ok && r.data && r.data.ok) {
+              status.textContent = 'Ready. Re-send your message to use the local model.';
+              setTimeout(() => dismiss(true), 2500);
+              return;
+            }
+            status.textContent = (r.data && r.data.error) || 'Could not activate local model.';
+            dismissBtn.disabled = false;
+          } catch (e) {
+            status.textContent = 'Network error during activation.';
+            dismissBtn.disabled = false;
+          }
+          return;
+        } else if (ui === 'needs-download') {
+          // Edge case: download didn't actually start. Surface clearly.
+          status.textContent = 'Download did not start. Try again from Settings → Providers.';
+          dismissBtn.disabled = false;
+          return;
+        }
+        _unpreparedPollTimer = setTimeout(tick, 2500);
+      };
+      tick();
+    });
+  }
+
   // ── Recovery banner (offer switch-off when remote is back) ──────────────
 
   let _bannerNode = null;
@@ -364,6 +495,15 @@
     // endpoint), but reuses the same _modalOpen guard so they don't stack.
     window.addEventListener('fitb:provider-timeout', () => {
       showTimeoutModal();
+    });
+
+    // FITB#129d: backend wanted to fail over to local but the model
+    // isn't downloaded yet. Modal offers the download with progress UI,
+    // then activates. Detail carries the upstream failure context so the
+    // modal can explain WHY we're prompting.
+    window.addEventListener('fitb:local-unprepared', (e) => {
+      if (sessionStorage.getItem(UNPREPARED_DISMISSED)) return;
+      showUnpreparedDownloadModal(e && e.detail || {});
     });
 
     // Decide whether to start recovery polling for the steady-state case
