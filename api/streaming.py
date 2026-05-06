@@ -37,6 +37,101 @@ from api.metering import meter
 # save/restore around the entire agent run.
 _ENV_LOCK = threading.Lock()
 
+# ── FITB#129b: failover-eligibility classifier + helper ────────────────────
+# When a remote provider call fails with one of these classified types AND
+# the user has the local fallback enabled AND the local model is healthy,
+# we silently swap the gateway's active model to local and emit a
+# `provider_switched` event instead of `apperror`. Frontend (#129c) renders
+# a "switched to local" badge; user re-sends the message to retry against
+# local. (Auto-retry of the in-flight prompt is deferred to #129c — for
+# this PR the swap happens, the user re-sends manually.)
+#
+# Eligibility set is broader than local_fallback.should_failover()'s
+# substring matcher (which excludes auth/quota for "don't mask config
+# errors"). The v0.5.2 design call: BEST UX — chat must work. Local IS
+# a working model regardless of why cloud failed.
+_FAILOVER_ELIGIBLE_TYPES = frozenset({
+    'auth_mismatch', 'quota_exhausted',
+    'stream_interrupted', 'no_response',
+    'unknown', 'model_not_found',
+})
+
+
+def _attempt_failover(err_type: str, token_sent: bool, put, stream_id: str) -> bool:
+    """Decide whether to silent-failover this error to the local model.
+
+    Returns True if the failover handled the error (caller should NOT
+    emit apperror but SHOULD still do its normal stream-state cleanup).
+    Returns False if the caller should continue with apperror as today.
+
+    Decision tree (FITB#129b, v0.5.2 locked design):
+      err_type not eligible           → False
+      fallback disabled               → False (existing reactive modal handles)
+      fallback enabled + ready        → activate, emit provider_switched, True
+      fallback enabled + no model     → emit local_fallback_unprepared, True
+                                        (frontend #129d will surface a download
+                                        confirm UX; the unprepared event carries
+                                        the original error context)
+      fallback enabled + unhealthy    → False (we can't help right now)
+    """
+    if err_type not in _FAILOVER_ELIGIBLE_TYPES:
+        return False
+    try:
+        from api.local_fallback import is_enabled, get_status, activate, LLAMA_SERVER_BASE_URL
+    except Exception:
+        # Shouldn't happen, but degrade silently — the user just sees the
+        # original error like before.
+        return False
+    if not is_enabled():
+        return False
+    # If the active model is ALREADY local, this error came FROM the local
+    # model — failing over to local won't help. Let apperror surface the
+    # local-side error so the user understands the actual problem.
+    try:
+        from api.config import get_config
+        active_cfg = (get_config() or {}).get('model') or {}
+        if str(active_cfg.get('base_url') or '').rstrip('/') == LLAMA_SERVER_BASE_URL.rstrip('/'):
+            return False
+    except Exception:
+        # If we can't read the config, err on the side of trying the
+        # failover — same blast radius as the pre-fix behavior.
+        pass
+    snap = get_status()
+    if snap.get('ready'):
+        # Happy path — silent failover.
+        if token_sent:
+            put('partial_response_truncated', {'reason': err_type})
+            STREAM_PARTIAL_TEXT.pop(stream_id, None)
+        result = activate()
+        if not result.get('ok'):
+            logger.warning(
+                "FITB#129b: fallback ready but activate() failed: %s",
+                result.get('error'),
+            )
+            return False
+        put('provider_switched', {
+            'from_type': err_type,
+            'to_provider': result.get('provider', 'custom'),
+            'to_model': result.get('active_model'),
+            'message': "Switched to local model.",
+        })
+        return True
+    if not snap.get('model_installed'):
+        # Fallback enabled but model not downloaded yet. Frontend #129d
+        # will offer a download confirm modal. Suppress apperror so the
+        # user sees one signal — the unprepared event carries the
+        # original error context.
+        put('local_fallback_unprepared', {
+            'reason': err_type,
+            'fallback_state': snap.get('ui_state'),
+            'model_id': snap.get('model_id'),
+            'model_size_bytes': snap.get('model_size_bytes'),
+        })
+        return True
+    # Fallback enabled, model installed, but unhealthy. Let apperror fire.
+    return False
+
+
 # Lazy import to avoid circular deps -- hermes-agent is on sys.path via api/config.py
 try:
     from run_agent import AIAgent
@@ -2163,11 +2258,18 @@ def _run_agent_streaming(
                         _err_label = 'No response received'
                         _err_type = 'no_response'
                         _err_hint = 'Verify your API key is valid and the selected model is available for your account.'
-                    put('apperror', {
-                        'message': _err_str or f'{_err_label}.',
-                        'type': _err_type,
-                        'hint': _err_hint,
-                    })
+                    # FITB#129b: try silent failover before emitting apperror.
+                    # If the user has local fallback enabled and ready, we swap
+                    # the gateway's active model to local and emit
+                    # `provider_switched` instead of `apperror`. Caller still
+                    # does the stream-state cleanup below.
+                    _did_failover = _attempt_failover(_err_type, _token_sent, put, stream_id)
+                    if not _did_failover:
+                        put('apperror', {
+                            'message': _err_str or f'{_err_label}.',
+                            'type': _err_type,
+                            'hint': _err_hint,
+                        })
                     # Clear stream/pending state so the session does not appear
                     # "agent_running" on reload after a silent failure.
                     # Persist the error so it survives page reload.
@@ -2177,28 +2279,32 @@ def _run_agent_streaming(
                     s.pending_user_message = None
                     s.pending_attachments = []
                     s.pending_started_at = None
-                    # Preserve partial text the user already saw so the chat
-                    # bubble doesn't appear to vanish on page reload. (#89)
-                    _partial = STREAM_PARTIAL_TEXT.get(stream_id, '') if _token_sent else ''
-                    if _partial:
-                        _persist_content = (
-                            f"{_partial}\n\n*[Stream interrupted: {_err_label}"
-                            + (f' — {_err_str}' if _err_str else '')
-                            + ']*'
-                        )
-                    else:
-                        _persist_content = f'**{_err_label}:** {_err_str or _err_label}\n\n*{_err_hint}*'
-                    s.messages.append({
-                        'role': 'assistant',
-                        'content': _persist_content,
-                        'timestamp': int(time.time()),
-                        '_error': True,
-                    })
+                    # FITB#129b: skip persisting an error message if we
+                    # silently failed over — the chat history shouldn't
+                    # show an error the user effectively never saw.
+                    if not _did_failover:
+                        # Preserve partial text the user already saw so the chat
+                        # bubble doesn't appear to vanish on page reload. (#89)
+                        _partial = STREAM_PARTIAL_TEXT.get(stream_id, '') if _token_sent else ''
+                        if _partial:
+                            _persist_content = (
+                                f"{_partial}\n\n*[Stream interrupted: {_err_label}"
+                                + (f' — {_err_str}' if _err_str else '')
+                                + ']*'
+                            )
+                        else:
+                            _persist_content = f'**{_err_label}:** {_err_str or _err_label}\n\n*{_err_hint}*'
+                        s.messages.append({
+                            'role': 'assistant',
+                            'content': _persist_content,
+                            'timestamp': int(time.time()),
+                            '_error': True,
+                        })
                     try:
                         s.save()
                     except Exception:
                         pass
-                    return  # apperror already closes the stream on the client side
+                    return  # apperror or provider_switched already closed the stream
 
                 # ── Handle context compression side effects ──
                 # If compression fired inside run_conversation, the agent may have
@@ -2528,6 +2634,11 @@ def _run_agent_streaming(
             )
         else:
             _exc_label, _exc_type, _exc_hint = 'Error', 'error', ''
+        # FITB#129b: decide failover BEFORE persisting the error message,
+        # so we don't append an error to chat history if we successfully
+        # rerouted to local. Both the message persistence below and the
+        # apperror put further down use this decision.
+        _exc_did_failover = _attempt_failover(_exc_type, _token_sent, put, stream_id)
         if s is not None:
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()
@@ -2542,36 +2653,42 @@ def _run_agent_streaming(
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
-                # If tokens already streamed before the exception, the user
-                # has been watching a partial response — preserve it on
-                # reload instead of replacing it with just the error. (#89)
-                _exc_partial = STREAM_PARTIAL_TEXT.get(stream_id, '')
-                if _exc_partial:
-                    _exc_persist = (
-                        f"{_exc_partial}\n\n*[Stream interrupted: {_exc_label}"
-                        + (f' — {err_str}' if err_str else '')
-                        + ']*'
-                        + (f'\n*{_exc_hint}*' if _exc_hint else '')
-                    )
-                else:
-                    _exc_persist = (
-                        f'**{_exc_label}:** {err_str}'
-                        + (f'\n\n*{_exc_hint}*' if _exc_hint else '')
-                    )
-                s.messages.append({
-                    'role': 'assistant',
-                    'content': _exc_persist,
-                    'timestamp': int(time.time()),
-                    '_error': True,
-                })
+                # FITB#129b: skip persisting an error message if we
+                # silently failed over — the chat history shouldn't
+                # show an error the user effectively never saw.
+                if not _exc_did_failover:
+                    # If tokens already streamed before the exception, the user
+                    # has been watching a partial response — preserve it on
+                    # reload instead of replacing it with just the error. (#89)
+                    _exc_partial = STREAM_PARTIAL_TEXT.get(stream_id, '')
+                    if _exc_partial:
+                        _exc_persist = (
+                            f"{_exc_partial}\n\n*[Stream interrupted: {_exc_label}"
+                            + (f' — {err_str}' if err_str else '')
+                            + ']*'
+                            + (f'\n*{_exc_hint}*' if _exc_hint else '')
+                        )
+                    else:
+                        _exc_persist = (
+                            f'**{_exc_label}:** {err_str}'
+                            + (f'\n\n*{_exc_hint}*' if _exc_hint else '')
+                        )
+                    s.messages.append({
+                        'role': 'assistant',
+                        'content': _exc_persist,
+                        'timestamp': int(time.time()),
+                        '_error': True,
+                    })
                 try:
                     s.save()
                 except Exception:
                     pass
-        _apperror_payload: dict = {'message': err_str, 'type': _exc_type}
-        if _exc_hint:
-            _apperror_payload['hint'] = _exc_hint
-        put('apperror', _apperror_payload)
+        # FITB#129b: only emit apperror if we did NOT failover.
+        if not _exc_did_failover:
+            _apperror_payload: dict = {'message': err_str, 'type': _exc_type}
+            if _exc_hint:
+                _apperror_payload['hint'] = _exc_hint
+            put('apperror', _apperror_payload)
     finally:
         # Stop the periodic checkpoint thread before the final recovery path.
         # The checkpoint thread also uses the per-session lock; joining it first
