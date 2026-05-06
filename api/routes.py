@@ -2422,6 +2422,11 @@ def handle_post(handler, parsed) -> bool:
         from api.local_fallback import handle_post_disable
         return j(handler, handle_post_disable(handler, body))
 
+    if parsed.path == "/api/local-fallback/activate":
+        from api.local_fallback import handle_post_activate
+        result = handle_post_activate(handler, body)
+        return j(handler, result, status=200 if result.get("ok") else 400)
+
     # ── Tailscale (POST) — issue #96 ──
     if parsed.path == "/api/tailscale/up":
         from api.tailscale import handle_post_up

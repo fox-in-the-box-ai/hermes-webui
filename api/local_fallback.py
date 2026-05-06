@@ -301,6 +301,11 @@ def get_status() -> dict[str, Any]:
     else:
         ui_state = "ready"
 
+    # `ready` is the single boolean the v0.5.2 failover loop (#129b) and
+    # the timeout modal (#128) check before deciding to switch the active
+    # model. Computed here so callers don't need to re-derive it from the
+    # individual fields. FITB#129a.
+    ready = bool(model and model.get("installed")) and healthy
     return {
         "enabled": enabled,
         "model_id": MODEL_ID,
@@ -311,6 +316,7 @@ def get_status() -> dict[str, Any]:
         "server_healthy": healthy,
         "endpoint": LLAMA_SERVER_BASE_URL if healthy else None,
         "ui_state": ui_state,
+        "ready": ready,
     }
 
 
@@ -418,6 +424,82 @@ def disable() -> dict[str, Any]:
     return get_status()
 
 
+def activate() -> dict[str, Any]:
+    """Make the bundled llama.cpp model the gateway's active model.
+
+    Mirrors the api/ollama.py:use_model pattern but for the bundled
+    Phi-4-mini llama-server endpoint. Used by:
+      - the v0.5.2 timeout modal (#128) when the user clicks "Switch now"
+      - the v0.5.2 auto-failover loop (#129b) on remote provider failure
+
+    Idempotent: writing the same model block twice has no observable
+    effect beyond a redundant gateway hot-reload.
+
+    Returns {ok: True, ...} on success or {ok: False, error: ...} when
+    the local fallback isn't ready (not enabled, model missing, or
+    llama-server unhealthy). Caller is responsible for surfacing the
+    error and offering recovery (e.g. trigger download via #10's
+    manager). FITB#129a.
+    """
+    snap = get_status()
+    if not snap.get("ready"):
+        # Granular error so the failover loop can decide between
+        # "offer download", "wait for warmup", or "give up".
+        if not snap.get("enabled"):
+            return {"ok": False, "error": "Local fallback is disabled. Enable it in Settings first.",
+                    "reason": "disabled"}
+        if not snap.get("model_installed"):
+            return {"ok": False, "error": "Local model is not installed. Download it first.",
+                    "reason": "missing-model"}
+        if not snap.get("server_healthy"):
+            return {"ok": False, "error": "Local model server is not healthy yet. Try again in a moment.",
+                    "reason": "unhealthy"}
+        return {"ok": False, "error": "Local fallback is not ready.", "reason": "not-ready"}
+
+    # Lazy import to keep import time of this module light.
+    from api.config import (
+        _get_config_path,
+        _save_yaml_config_file,
+        get_config,
+        reload_config,
+    )
+
+    cfg = get_config()
+    if not isinstance(cfg, dict):
+        cfg = {}
+    # Replace the model block wholesale (same QA fix as api/ollama.py:
+    # mutating the dict in place leaks provider-specific keys
+    # — azure_endpoint, aws_*, openai_organization, custom headers — from
+    # whatever provider was active before the switch).
+    cfg["model"] = {
+        "provider": "custom",
+        "base_url": LLAMA_SERVER_BASE_URL,
+        "name": MODEL_ID,
+    }
+
+    try:
+        _save_yaml_config_file(_get_config_path(), cfg)
+        reload_config()
+    except Exception as exc:
+        logger.exception("Failed to activate local fallback: %s", exc)
+        return {"ok": False, "error": f"Failed to update config: {exc}", "reason": "config-write-failed"}
+
+    # Best-effort gateway hot-reload (mirrors api/providers._reload_provider_runtime,
+    # added in v0.2.0 PR #61). Safe no-op outside FITB.
+    try:
+        from api.providers import _reload_provider_runtime
+        _reload_provider_runtime()
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "active_model": MODEL_ID,
+        "base_url": LLAMA_SERVER_BASE_URL,
+        "provider": "custom",
+    }
+
+
 # ── Remote-health probe (#9 polish recovery banner) ───────────────────────
 
 
@@ -522,6 +604,11 @@ def handle_post_enable(handler, body: dict) -> dict[str, Any]:
 def handle_post_disable(handler, body: dict) -> dict[str, Any]:
     """POST /api/local-fallback/disable — toggle off."""
     return disable()
+
+
+def handle_post_activate(handler, body: dict) -> dict[str, Any]:
+    """POST /api/local-fallback/activate — switch active model to local. FITB#129a."""
+    return activate()
 
 
 def handle_get_remote_health(handler) -> dict[str, Any]:
