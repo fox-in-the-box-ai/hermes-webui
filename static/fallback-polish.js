@@ -22,11 +22,20 @@
   const MODAL_DISMISSED = 'fitb.fallback_modal_seen';
   const BANNER_DISMISSED = 'fitb.recovery_banner_dismissed';
   const RECOVERY_POLL_MS = 90 * 1000;
-  // Error types the modal reacts to. Excludes errors where local fallback
-  // wouldn't help (auth/quota/model-not-found — local model can't fix
-  // those).
+  // Error types the modal reacts to. The original logic excluded auth /
+  // quota errors on the rationale that "local fallback can't fix the
+  // user's wrong key / empty wallet." That reasoning misread the value
+  // proposition: local fallback REPLACES the broken cloud entirely so
+  // the user can keep working, regardless of why cloud is broken. Auth
+  // and quota errors are exactly when local fallback should be offered.
+  // FITB#122 #6.
+  //
+  // Backend error types come from api/streaming.py: 'quota_exhausted',
+  // 'auth_mismatch', 'stream_interrupted', 'no_response'. The previous
+  // 'rate_limit' entry was dead — backend never emits it.
   const ELIGIBLE_TYPES = new Set([
-    'stream_interrupted', 'rate_limit', 'no_response', 'unknown',
+    'auth_mismatch', 'quota_exhausted',
+    'stream_interrupted', 'no_response', 'unknown',
   ]);
 
   function escapeHtml(s) {
@@ -265,7 +274,17 @@
       maybeReactToError(e && e.detail);
     });
 
-    // Decide whether to start recovery polling
+    // FITB#122 #7: also start recovery polling when the user enables
+    // fallback after page load. Pre-fix this only fired if fallback was
+    // already enabled at boot, so the most common flow (user hits a
+    // provider failure → enables fallback in Settings → corrects key →
+    // expects banner) silently never started polling.
+    window.addEventListener('fitb:fallback-enabled', () => {
+      startRecoveryPolling();
+    });
+
+    // Decide whether to start recovery polling for the steady-state case
+    // (fallback was already enabled when this page loaded).
     let s;
     try {
       s = await fetchJson('/api/local-fallback/status');

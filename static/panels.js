@@ -3842,6 +3842,12 @@ async function onLocalFallbackToggle(){
     const result = await r.json();
     if(result.enabled !== undefined){
       toggle.checked = !!result.enabled;
+      // FITB#122 #7: tell fallback-polish.js to start recovery polling
+      // when fallback is enabled mid-session — its boot-time gate only
+      // catches the case where fallback was already on at page load.
+      if(result.enabled){
+        window.dispatchEvent(new CustomEvent('fitb:fallback-enabled'));
+      }
     }
     // Immediate re-render of the status line; the poller takes over from here.
     _refreshLocalFallback();
