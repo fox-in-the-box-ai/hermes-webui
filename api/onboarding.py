@@ -22,7 +22,20 @@ ONBOARDING_PATH = Path(os.environ.get("ONBOARDING_PATH", "/data/config/onboardin
 
 # ── Paths exempt from redirect ───────────────────────────────────────────────
 
-_SETUP_PREFIXES = ("/setup", "/api/setup/", "/static/setup.", "/health", "/static/favicon")
+# Wizard probes Ollama and the bundled local-fallback during boot to render
+# the local-model fast-paths on Step 1 (#69). Without these prefixes the
+# probes 302 to /setup, fetch follows, JSON.parse fails on HTML, the .catch
+# in setup.js silently zeros state.ollama / state.localFallback, and the
+# detection boxes never render — even when Ollama is running on the host.
+_SETUP_PREFIXES = (
+    "/setup",
+    "/api/setup/",
+    "/api/ollama/",
+    "/api/local-fallback/",
+    "/static/setup.",
+    "/health",
+    "/static/favicon",
+)
 
 
 def onboarding_complete() -> bool:
