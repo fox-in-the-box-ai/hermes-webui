@@ -8,6 +8,8 @@ const state = {
   apiKey: '',
   welcomeText: null,        // populated on boot from /api/setup/welcome
   ollama: null,             // {running, host, version, models[]} populated on Welcome
+  localFallback: null,      // {ui_state, model_installed, model_size_bytes, ...} from /api/local-fallback/status
+  localModel: null,         // {provider: 'ollama'|'llama-cpp', name} once user picks a local path
 };
 
 // ── API helpers ──────────────────────────────────────────────────────────────
@@ -147,6 +149,35 @@ function renderStep1() {
 }
 
 function renderStep2() {
+  // When the user picked a local model on Step 1, OpenRouter becomes
+  // optional — they already have a working model. Show a clear "continue
+  // local-only" path so they don't have to dig through the wizard skip
+  // footer (which carries an "are you sure?" confirm aimed at users who
+  // haven't configured anything). Onboarding still completes at Step 3.
+  if (state.localModel) {
+    const localLabel = state.localModel.provider === 'ollama'
+      ? `${escapeHtml(state.localModel.name)} via Ollama`
+      : `${escapeHtml(state.localModel.name)} (bundled local model)`;
+    return `
+      <div class="step">
+        <h1>Add OpenRouter (optional)</h1>
+        <p>You're set up with <strong>${localLabel}</strong>. Add an OpenRouter API key for cloud models too, or continue with local-only.</p>
+        <label for="api-key">OpenRouter API Key</label>
+        <div class="input-wrapper">
+          <input id="api-key" type="password" placeholder="sk-or-..." autocomplete="off" spellcheck="false">
+          <button class="toggle-vis" type="button" onclick="toggleKeyVisibility()" aria-label="Toggle key visibility">show</button>
+        </div>
+        <div class="hint">
+          Get a free key at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai</a>
+        </div>
+        <div id="key-error" class="error-msg"></div>
+        <div class="btn-actions">
+          <button id="submit-key" class="btn btn-primary" onclick="submitApiKey()">Add &amp; continue</button>
+          <button class="btn btn-secondary" type="button" onclick="advance(3)">Continue with local only</button>
+        </div>
+      </div>
+    `;
+  }
   return `
     <div class="step">
       <h1>OpenRouter API Key</h1>
@@ -169,10 +200,25 @@ function renderStep2() {
 }
 
 function renderStep3() {
+  // Echo back what's configured so the user knows what they're committing
+  // to before clicking Open Fox. Either or both can be set; one of them is
+  // guaranteed by the time we reach Step 3 (Step 2 either submits an
+  // OpenRouter key or routes "Continue with local only" past it).
+  let summary = '';
+  if (state.localModel) {
+    const localLabel = state.localModel.provider === 'ollama'
+      ? `${escapeHtml(state.localModel.name)} (Ollama, local)`
+      : `${escapeHtml(state.localModel.name)} (bundled local model)`;
+    summary += `<li>Local model: <code>${localLabel}</code></li>`;
+  }
+  if (state.apiKey) {
+    summary += `<li>OpenRouter: configured (cloud models available)</li>`;
+  }
   return `
     <div class="step">
       <h1>Fox is ready!</h1>
       <p>Your assistant is configured and ready to go.</p>
+      ${summary ? `<ul class="url-list">${summary}</ul>` : ''}
       <ul class="url-list">
         <li>Local: <code>http://localhost:8787</code></li>
       </ul>
@@ -281,9 +327,8 @@ async function useLocalOllama(modelName) {
   if (!modelName) return;
 
   // Replace wizard contents synchronously so the user can't click Next /
-  // Skip while the model swap + setup-complete + delayed redirect are in
-  // flight. Without this, advance(2) ran during the 800ms redirect window
-  // and the user landed in chat from a stale Step 2 input click (FITB#122).
+  // Skip during the use-model API call. Without this, advance(2) could be
+  // triggered mid-async, leaving the user on a stale step (FITB#122 race).
   const container = document.getElementById('step-container');
   if (container) {
     container.innerHTML = `
@@ -309,10 +354,13 @@ async function useLocalOllama(modelName) {
     renderStep(1);
     return;
   }
-  // Mark onboarding complete and proceed. The gateway hot-reload was
-  // triggered server-side by use_model() — webui keeps running.
-  try { await post('/api/setup/complete', { tailscale_connected: false }); } catch (e) {}
-  setTimeout(() => { window.location.href = '/'; }, 800);
+
+  // Local model is now active on the gateway. Continue through Step 2
+  // (OpenRouter, optional) so the user explicitly completes the wizard at
+  // Step 3. Onboarding is NOT marked complete here — that happens in
+  // completeSetup() when the user clicks Open Fox on Step 3.
+  state.localModel = { provider: 'ollama', name: modelName };
+  advance(2);
 }
 
 // Issue #69: bundled llama.cpp fast-path. Toggles on local fallback (kicks
@@ -426,8 +474,11 @@ async function useLlamaCppFallback() {
     }
     _renderLocalFallbackProgress(s);
     if (s.ui_state === 'ready') {
-      try { await post('/api/setup/complete', { tailscale_connected: false }); } catch (e) {}
-      setTimeout(() => { window.location.href = '/'; }, 800);
+      // Bundled local model is now active. Continue through Step 2 so the
+      // user explicitly completes the wizard at Step 3 — onboarding gets
+      // marked complete in completeSetup() when they click Open Fox.
+      state.localModel = { provider: 'llama-cpp', name: 'Phi-4-mini' };
+      advance(2);
       return;
     }
     setTimeout(tick, 2000);
