@@ -279,14 +279,34 @@ async function skipOnboarding() {
 
 async function useLocalOllama(modelName) {
   if (!modelName) return;
+
+  // Replace wizard contents synchronously so the user can't click Next /
+  // Skip while the model swap + setup-complete + delayed redirect are in
+  // flight. Without this, advance(2) ran during the 800ms redirect window
+  // and the user landed in chat from a stale Step 2 input click (FITB#122).
+  const container = document.getElementById('step-container');
+  if (container) {
+    container.innerHTML = `
+      <div class="step">
+        <h1>Setting up ${escapeHtml(modelName)}</h1>
+        <p>Switching to your local model. This will only take a moment.</p>
+        <div class="btn-actions">
+          <button class="btn btn-primary" disabled><span class="spinner"></span> Setting up…</button>
+        </div>
+      </div>
+    `;
+  }
+
   try {
     const r = await post('/api/ollama/use-model', { model: modelName });
     if (!r.data.ok) {
       alert('Could not switch to local model: ' + (r.data.error || 'unknown error'));
+      renderStep(1);
       return;
     }
   } catch (e) {
     alert('Network error while switching to local model.');
+    renderStep(1);
     return;
   }
   // Mark onboarding complete and proceed. The gateway hot-reload was
