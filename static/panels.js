@@ -3631,7 +3631,62 @@ const _OLLAMA_RECOMMENDED = [
 
 let _ollamaPullActive = false;
 
+// FITB#109: hydrate the custom Ollama URL field from saved settings
+// when the Ollama tile loads. Done once per Settings render — the input
+// is then user-editable; saveOllamaCustomUrl() persists changes.
+async function _hydrateOllamaCustomUrl(){
+  const input = document.getElementById('ollamaCustomUrl');
+  if(!input) return;
+  try{
+    const s = await api('/api/settings');
+    if(s && typeof s.ollama_custom_url === 'string'){
+      input.value = s.ollama_custom_url;
+    }
+  }catch(_){ /* non-fatal — input just stays empty */ }
+}
+
+async function saveOllamaCustomUrl(){
+  const input = document.getElementById('ollamaCustomUrl');
+  const status = document.getElementById('ollamaCustomUrlStatus');
+  if(!input) return;
+  const raw = (input.value || '').trim();
+  if(status) status.textContent = 'Applying…';
+  try{
+    const r = await fetch('/api/settings', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ollama_custom_url: raw}),
+    });
+    if(r.status === 400){
+      const body = await r.json().catch(() => ({}));
+      if(status) status.textContent = body.error || 'Invalid URL — must be http(s)://host[:port].';
+      return;
+    }
+    if(!r.ok){
+      if(status) status.textContent = 'Could not save.';
+      return;
+    }
+    // Cache invalidation happens server-side (api/config.save_settings).
+    // Re-probe so the user sees the result instantly.
+    if(status) status.textContent = raw ? 'Saved. Re-probing…' : 'Cleared. Auto-detection restored.';
+    await refreshOllamaLocal();
+    if(status){
+      // Status from the re-probe is now in ollamaLocalStatus; surface a brief confirm here too.
+      const live = document.getElementById('ollamaLocalStatus');
+      const liveText = live ? live.textContent : '';
+      status.textContent = raw
+        ? (liveText.includes('Running on') ? 'Saved. Detected: ' + liveText : 'Saved. ' + liveText)
+        : 'Cleared. Auto-detection restored.';
+    }
+  }catch(e){
+    if(status) status.textContent = 'Network error.';
+  }
+}
+
 async function loadOllamaLocal(){
+  // FITB#109: hydrate the custom URL input on every Ollama tile render.
+  // Cheap (one /api/settings GET, already cached webui-side).
+  _hydrateOllamaCustomUrl();
   const dot       = document.getElementById('ollamaLocalDot');
   const statusEl  = document.getElementById('ollamaLocalStatus');
   const diskEl    = document.getElementById('ollamaLocalDisk');

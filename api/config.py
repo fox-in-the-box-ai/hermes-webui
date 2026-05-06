@@ -2338,6 +2338,10 @@ _SETTINGS_DEFAULTS = {
     "tailscale_accept_routes": False,
     "tailscale_accept_dns": True,
     "tailscale_exit_node": "",
+    # FITB#109: custom Ollama base URL. Empty means "auto-detect" (probe
+    # host.docker.internal then localhost). Validated and normalized at
+    # /api/settings save time by api/ollama.validate_custom_ollama_url.
+    "ollama_custom_url": "",
 }
 _SETTINGS_LEGACY_DROP_KEYS = {"assistant_language", "bubble_layout", "default_model"}
 _SETTINGS_THEME_VALUES = {"light", "dark", "system"}
@@ -2477,6 +2481,22 @@ def save_settings(settings: dict) -> dict:
     except ImportError:
         # Tailscale module not present in some test contexts — skip the gate.
         pass
+    # FITB#109: validate ollama_custom_url at the save gate. Same
+    # belt-and-suspenders pattern as Tailscale fields — probe-time
+    # validation re-runs as defense in depth, but rejecting at save
+    # means malformed values never persist in settings.json.
+    _ollama_url_changed = False
+    if "ollama_custom_url" in settings:
+        try:
+            from api.ollama import validate_custom_ollama_url
+            ok, normalized_or_err = validate_custom_ollama_url(settings["ollama_custom_url"])
+            if not ok:
+                raise ValueError(f"Ollama setting rejected: {normalized_or_err}")
+            # Persist the normalized form (trailing slash stripped, etc.)
+            settings["ollama_custom_url"] = normalized_or_err
+            _ollama_url_changed = True
+        except ImportError:
+            pass
     current = load_settings()
     pending_theme = current.get("theme")
     pending_skin = current.get("skin")
@@ -2554,6 +2574,15 @@ def save_settings(settings: dict) -> dict:
     global DEFAULT_WORKSPACE
     if "default_workspace" in current:
         DEFAULT_WORKSPACE = resolve_default_workspace(current["default_workspace"])
+    # FITB#109: invalidate the Ollama probe cache so the user sees the
+    # detection result against the new URL on the next /api/ollama/status
+    # call instead of waiting up to 10s for the cache to expire naturally.
+    if _ollama_url_changed:
+        try:
+            from api.ollama import clear_cache as _clear_ollama_cache
+            _clear_ollama_cache()
+        except Exception:
+            pass
     current["default_model"] = get_effective_default_model()
     return current
 

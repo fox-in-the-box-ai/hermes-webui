@@ -44,12 +44,49 @@ _MODEL_NAME_MAX = 200
 # Ordered probe candidates. host.docker.internal first because that's the
 # canonical Docker → host route; localhost as a fallback for rare native
 # installs. Both share the default Ollama port.
-_PROBE_HOSTS = (
+#
+# FITB#109: a user-supplied custom URL (settings.ollama_custom_url) is
+# prepended to this list at probe time — it's an explicit user choice,
+# so it always wins over auto-detection. Empty / unset means "use the
+# defaults below."
+_PROBE_HOSTS_DEFAULT = (
     "http://host.docker.internal:11434",
     "http://localhost:11434",
 )
 _PROBE_TIMEOUT_SEC = 1.0
 _CACHE_TTL_SEC = 10.0  # keep Settings-page loads snappy without hiding state changes too long
+
+# FITB#109: minimal validator for the custom Ollama URL. Reject malformed
+# values at save time AND at probe time (defense in depth). Allows
+# http(s)://host[:port][/path]; rejects leading dashes (would be parsed
+# as flags by some downstream subprocess invocations) and control chars.
+_OLLAMA_URL_RE = re.compile(r"^https?://[a-zA-Z0-9.\-_:/]+(?:/[a-zA-Z0-9.\-_:/?&=%~]*)?$")
+_OLLAMA_URL_MAX_LEN = 512
+
+
+def validate_custom_ollama_url(value: Any) -> tuple[bool, str]:
+    """Validate + normalize a user-supplied Ollama URL.
+
+    Returns ``(ok, normalized_or_error)``. Empty input is valid (means
+    "unset"). Trailing slash stripped on success. Used by both
+    /api/settings save (api/config.validate_settings_dict) and probe-time
+    consumption (defense in depth in case settings.json was edited
+    manually).
+    """
+    if value is None:
+        return True, ""
+    if not isinstance(value, str):
+        return False, "ollama_custom_url must be a string"
+    s = value.strip()
+    if not s:
+        return True, ""
+    if len(s) > _OLLAMA_URL_MAX_LEN:
+        return False, "ollama_custom_url is too long"
+    if any(ord(c) < 0x20 for c in s):
+        return False, "ollama_custom_url contains control characters"
+    if not _OLLAMA_URL_RE.match(s):
+        return False, "ollama_custom_url must be http(s)://host[:port]"
+    return True, s.rstrip("/")
 
 # Module-level cache for the detection probe. We expect a few calls per
 # Settings render; caching avoids waiting on two TCP connect timeouts each
@@ -88,10 +125,30 @@ def _http_json(url: str, method: str = "GET", body: dict | None = None,
         return None
 
 
+def _probe_hosts() -> tuple[str, ...]:
+    """Build the probe-host list. FITB#109: a settings-supplied custom
+    URL is tried first when present (explicit user choice wins over
+    auto-detection). Falls back to the default Docker / localhost pair.
+
+    Re-validates the stored value (settings.json could have been hand-
+    edited bypass the api/settings save path); silently drops invalid
+    entries rather than blocking detection entirely.
+    """
+    try:
+        from api.config import load_settings
+        raw = (load_settings() or {}).get("ollama_custom_url", "")
+    except Exception:
+        raw = ""
+    ok, normalized = validate_custom_ollama_url(raw)
+    if ok and normalized:
+        return (normalized, *_PROBE_HOSTS_DEFAULT)
+    return _PROBE_HOSTS_DEFAULT
+
+
 def _probe() -> dict[str, Any]:
     """Return {up, host, version} for the first reachable Ollama daemon, or
     {up: False} if none. `host` is the base URL (no `/api` suffix)."""
-    for base in _PROBE_HOSTS:
+    for base in _probe_hosts():
         info = _http_json(f"{base}/api/version", timeout=_PROBE_TIMEOUT_SEC)
         if info and isinstance(info, dict) and "version" in info:
             return {"up": True, "host": base, "version": info.get("version", "")}
