@@ -1085,6 +1085,79 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
+    // FITB#129c: provider_switched event — backend silently swapped the
+    // gateway's active model to local fallback after a remote failure.
+    // Show an inline notice so the user knows what happened and re-sends
+    // their message against local. Auto-retry of the in-flight prompt is
+    // out of scope for v0.5.2 — same UX as #128's timeout modal.
+    source.addEventListener('provider_switched',e=>{
+      if(!S.session||S.session.session_id!==activeSid) return;
+      try{
+        const d=JSON.parse(e.data);
+        const toModel=d.to_model||'local model';
+        // Composer status — visible while the user types their next message.
+        setComposerStatus(`Switched to ${toModel}. Re-send your message to use it.`);
+        setTimeout(()=>setComposerStatus(''),8000);
+        // Append a small system-style note in the message list so the
+        // user has context. Server-side already persists session state
+        // via run_conversation; the client just appends locally for the
+        // current view. On reload, the server's session messages drive
+        // the source of truth.
+        if(S.session && S.session.session_id===activeSid){
+          S.messages.push({
+            role:'assistant',
+            content:`*Switched to ${toModel} — re-send your message to use the local model.*`,
+            timestamp:Math.floor(Date.now()/1000),
+            _system_note:true,
+          });
+          renderMessages();
+        }
+        if(!INFLIGHT[activeSid] || !INFLIGHT[activeSid].messages){
+          setBusy(false);
+        }
+      }catch(_){}
+    });
+
+    // FITB#129c: partial_response_truncated — backend wiped a partial
+    // response when failing over to local. Clear the in-progress assistant
+    // row so the half-finished bubble doesn't linger. The provider_switched
+    // event right after will append the system-style note.
+    source.addEventListener('partial_response_truncated',e=>{
+      if(!S.session||S.session.session_id!==activeSid) return;
+      try{
+        // Clear accumulated stream text so any subsequent renderMessages()
+        // call doesn't replay it.
+        assistantText='';
+        reasoningText='';
+        liveReasoningText='';
+        // Drop the in-DOM assistant row if one exists.
+        if(typeof assistantRow !== 'undefined' && assistantRow && assistantRow.remove){
+          assistantRow.remove();
+          assistantRow=null;
+        }
+        renderMessages();
+      }catch(_){}
+    });
+
+    // FITB#129d: local_fallback_unprepared — backend wanted to fail over
+    // but the local model isn't downloaded yet. Hand off to fallback-polish.js
+    // which renders a "Download local model?" confirm modal with progress UI.
+    source.addEventListener('local_fallback_unprepared',e=>{
+      if(!S.session||S.session.session_id!==activeSid) return;
+      try{
+        const d=JSON.parse(e.data);
+        window.dispatchEvent(new CustomEvent('fitb:local-unprepared',{detail:d}));
+      }catch(_){
+        window.dispatchEvent(new CustomEvent('fitb:local-unprepared',{detail:{}}));
+      }
+      // Backend suppressed apperror, so we also need to take the streaming
+      // UI out of busy state — the modal owns the user's next decision.
+      if(!INFLIGHT[activeSid] || !INFLIGHT[activeSid].messages){
+        setBusy(false);
+        setComposerStatus('');
+      }
+    });
+
     source.addEventListener('error',async e=>{
       source.close();
       if(_terminalStateReached || _streamFinalized){
