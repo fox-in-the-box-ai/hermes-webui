@@ -3293,6 +3293,74 @@ function _tsRender(state){
   }
   if(connectBtn) connectBtn.style.display = ui === 'connected' ? 'none' : '';
   if(disconnectBtn) disconnectBtn.style.display = ui === 'connected' ? '' : 'none';
+
+  // FITB#122 #2: surface Serve state + manual retry. Only meaningful when
+  // connected — pre-Running there's no tunnel to bind HTTPS against.
+  _tsRenderServeState(ui === 'connected' ? state : null);
+}
+
+function _tsRenderServeState(state){
+  // Renders into the dedicated #tsServeState block. If the block doesn't
+  // exist in the DOM (older HTML, not yet redeployed), bail silently.
+  const el = document.getElementById('tsServeState');
+  if(!el) return;
+  if(!state){
+    el.innerHTML = '';
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = '';
+  const ss = state.serve_state || 'idle';
+  const err = state.serve_error || '';
+  if(ss === 'ok'){
+    el.innerHTML = '<span class="ts-serve-ok">HTTPS configured ✓</span>';
+    return;
+  }
+  // Both 'idle' (never tried in this session) and 'error' (last try failed)
+  // get the same affordance: a button that runs configure_serve. The error
+  // text only renders for 'error', so users authing via the desktop app
+  // see a neutral "Configure HTTPS" prompt rather than a fake error.
+  const errLine = ss === 'error' && err
+    ? `<div class="ts-serve-error-msg">${escapeHtmlOrPassthrough(err)}</div>`
+    : '';
+  el.innerHTML = `
+    <div class="ts-serve-row">
+      <button id="tsConfigureServeBtn" class="btn btn-link" type="button" onclick="tsConfigureServe()">Configure HTTPS</button>
+      <span class="ts-serve-hint">Required for the tailnet HTTPS URL. Toggle "Enable HTTPS" in your tailnet admin console first.</span>
+    </div>
+    ${errLine}
+  `;
+}
+
+// escapeHtml may live in another file (i18n.js / ui.js). Use whichever is
+// in scope; fall back to a minimal local escape so this module stays self-
+// contained against whichever bundle order the page uses.
+function escapeHtmlOrPassthrough(s){
+  if(typeof window !== 'undefined' && typeof window.escapeHtml === 'function'){
+    return window.escapeHtml(s);
+  }
+  return String(s || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+async function tsConfigureServe(){
+  const btn = document.getElementById('tsConfigureServeBtn');
+  if(btn){ btn.disabled = true; btn.textContent = 'Configuring…'; }
+  try{
+    const r = await fetch('/api/tailscale/serve', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const result = await r.json();
+    if(!result.ok){
+      showToast('Could not configure HTTPS: ' + (result.error || 'unknown error'));
+    }else{
+      showToast('Tailnet HTTPS configured.');
+    }
+  }catch(e){
+    showToast('Network error configuring HTTPS.');
+  }
+  // Re-fetch status so _tsRender picks up the new serve_state on the next
+  // render. loadTailscaleConnection rebinds the badge + serve row.
+  loadTailscaleConnection();
 }
 
 function _tsMessage(msg){

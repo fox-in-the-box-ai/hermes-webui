@@ -267,6 +267,13 @@ def get_status() -> dict[str, Any]:
     # trailing dot for display, build an HTTPS URL the UI can show.
     dns = (self_node.get("DNSName") or "").rstrip(".")
     https_url = f"https://{dns}/" if dns else ""
+    # FITB#122 #2: include the webui's view of Serve state so the panel
+    # can render a "Configure HTTPS" affordance steadily — works whether
+    # the user authed via Connect (up_state populated) or via the desktop
+    # Tailscale app (up_state stays idle; user clicks the button manually).
+    with _up_lock:
+        serve_snap = (_up_state.get("serve_state", "idle"),
+                      _up_state.get("serve_error", ""))
     return {
         "available": True,
         "backend_state": s.get("BackendState") or "Unknown",
@@ -279,6 +286,8 @@ def get_status() -> dict[str, Any]:
         "magic_dns_suffix": s.get("MagicDNSSuffix") or "",
         "tailnet_url": https_url,
         "peers_count": len(s.get("Peer") or {}),
+        "serve_state": serve_snap[0],
+        "serve_error": serve_snap[1],
         # Persisted power-user flags (#96 phase 2). UI pre-populates the
         # advanced accordion from these and sends edits back via the
         # standard /api/settings POST.
@@ -297,6 +306,14 @@ _up_state: dict[str, Any] = {
     "ended_at": 0.0,
     "error": "",
     "attempt_id": 0,
+    # Serve auto-config state, populated after the daemon transitions to
+    # Running. "ok" = HTTPS bound to localhost:8787; "error" = the CLI
+    # rejected the call (most often "Serve is not enabled on your tailnet"
+    # — needs HTTPS toggled in admin console). Surfacing it lets the UI
+    # show a "Configure HTTPS" retry button instead of silently failing.
+    # FITB#122 #2.
+    "serve_state": "idle",
+    "serve_error": "",
 }
 # QA fix: previously _up_proc and _up_log were module-level globals
 # mutated outside _up_lock, with the daemon thread reading the *current*
@@ -544,10 +561,7 @@ def _up_subprocess(argv: list[str], env: dict | None, attempt_id: int) -> None:
                 still_current = (_up_state.get("attempt_id") == attempt_id and
                                  _up_state.get("state") == "running")
             if still_current:
-                try:
-                    configure_serve()
-                except Exception:
-                    logger.debug("Auto-configure Serve after Running failed", exc_info=True)
+                _attempt_configure_serve(attempt_id)
         else:
             # Edge case: rc=0 but daemon not Running (e.g. login-only mode).
             # Treat as failed so UI re-prompts.
@@ -672,6 +686,11 @@ def get_up_progress() -> dict[str, Any]:
             # state="running" over freshly-cleared idle, bringing back
             # the "Connected" badge after the user explicitly disconnected.
             _set_up_state(snap.get("attempt_id"), state="running", ended_at=time.time())
+            # FITB#122 #2: also drive Serve auto-config from this path —
+            # users who auth via the desktop Tailscale app (not webui's
+            # Connect button) hit this branch first, so without it Serve
+            # would never get configured for them.
+            _attempt_configure_serve(snap.get("attempt_id"))
             with _up_lock:
                 snap = dict(_up_state)
     return {
@@ -680,6 +699,8 @@ def get_up_progress() -> dict[str, Any]:
         "error": snap["error"],
         "started_at": snap["started_at"],
         "ended_at": snap["ended_at"],
+        "serve_state": snap.get("serve_state", "idle"),
+        "serve_error": snap.get("serve_error", ""),
     }
 
 
@@ -718,6 +739,8 @@ def logout() -> dict[str, Any]:
             "error": "",
             "started_at": 0.0,
             "ended_at": 0.0,
+            "serve_state": "idle",
+            "serve_error": "",
         })
 
     # Reset Tailscale Serve config best-effort. `tailscale serve reset`
@@ -762,6 +785,36 @@ def configure_serve() -> dict[str, Any]:
     return {"ok": True}
 
 
+def _attempt_configure_serve(attempt_id: int | None = None) -> dict[str, Any]:
+    """Run configure_serve() and record the outcome on _up_state so the UI
+    can show success / surface the error / offer a retry. Single channel
+    that every code path uses (start_up after rc=0, get_up_progress on
+    mid-poll Running detection, the explicit POST /api/tailscale/serve
+    retry endpoint) — keeps configure_serve itself pure (CLI only) and
+    centralises the state-write so it's gated by attempt_id consistently.
+
+    The optional attempt_id is forwarded to _set_up_state so a stale daemon
+    thread can't clobber the active attempt's serve_state, mirroring the
+    existing guard for state= updates.
+
+    Returns the configure_serve() result so callers (e.g. handle_post_serve)
+    can pass it back over the wire.
+    """
+    try:
+        result = configure_serve()
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.debug("configure_serve raised", exc_info=True)
+        err_msg = f"unexpected: {exc}"
+        _set_up_state(attempt_id, serve_state="error", serve_error=err_msg)
+        return {"ok": False, "error": err_msg}
+    if not result.get("ok"):
+        _set_up_state(attempt_id, serve_state="error",
+                      serve_error=result.get("error", "tailscale serve failed"))
+    else:
+        _set_up_state(attempt_id, serve_state="ok", serve_error="")
+    return result
+
+
 def get_serve_status() -> dict[str, Any]:
     """GET /api/tailscale/serve — current `tailscale serve status`."""
     rc, out, err = _run_tailscale(["serve", "status", "--json"], timeout=5.0)
@@ -793,7 +846,10 @@ def handle_post_logout(handler, body: dict) -> dict[str, Any]:
 
 
 def handle_post_serve(handler, body: dict) -> dict[str, Any]:
-    return configure_serve()
+    # Route through _attempt_configure_serve so the manual retry (this
+    # endpoint) writes the same up_state the auto-config paths do — UI
+    # polls /api/tailscale/status and renders from there. FITB#122 #2.
+    return _attempt_configure_serve()
 
 
 def handle_get_serve(handler) -> dict[str, Any]:
