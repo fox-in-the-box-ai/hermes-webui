@@ -144,6 +144,80 @@
     });
   }
 
+  // FITB#128: provider-not-responding modal variant. Different copy +
+  // action from showReactiveModal (which is for explicit error events).
+  // This one fires when the SSE stream opens but no event arrives within
+  // the configured window. Auto-dismisses if a real event arrives late.
+  let _timeoutModalNode = null;
+  async function showTimeoutModal() {
+    if (_modalOpen) return;
+    if (_timeoutModalNode) return;  // already showing
+
+    const wrap = document.createElement('div');
+    wrap.className = 'fitb-fb-modal-backdrop';
+    wrap.innerHTML = `
+      <div class="fitb-fb-modal" role="dialog" aria-modal="true" aria-labelledby="fitbTimeoutTitle">
+        <div class="fitb-fb-modal-title" id="fitbTimeoutTitle">Provider isn't responding</div>
+        <div class="fitb-fb-modal-body">Your AI provider hasn't sent a response yet. Switch to a local model to keep working — your message can be re-sent against the local model immediately.</div>
+        <div class="fitb-fb-modal-status" id="fitbTimeoutStatus"></div>
+        <div class="fitb-fb-modal-actions">
+          <button type="button" class="fitb-btn fitb-btn-link" id="fitbTimeoutCancel">Keep waiting</button>
+          <button type="button" class="fitb-btn fitb-btn-primary" id="fitbTimeoutSwitch">Switch to local now</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(wrap);
+    _timeoutModalNode = wrap;
+    _modalOpen = true;
+
+    const switchBtn = wrap.querySelector('#fitbTimeoutSwitch');
+    const cancelBtn = wrap.querySelector('#fitbTimeoutCancel');
+    const status = wrap.querySelector('#fitbTimeoutStatus');
+
+    const dismiss = () => {
+      _modalOpen = false;
+      _timeoutModalNode = null;
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('fitb:provider-resumed', onResume);
+      closeNode(wrap);
+    };
+
+    const onKey = (e) => { if (e.key === 'Escape') dismiss(); };
+    const onResume = () => dismiss();  // late SSE arrival → auto-dismiss
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('fitb:provider-resumed', onResume);
+
+    cancelBtn.addEventListener('click', dismiss);
+    switchBtn.addEventListener('click', async () => {
+      switchBtn.disabled = true;
+      cancelBtn.disabled = true;
+      status.textContent = 'Switching…';
+      const r = await postJson('/api/local-fallback/activate', {});
+      if (r.ok && r.data && r.data.ok) {
+        status.textContent = 'Switched to local. Re-send your message to use it.';
+        setTimeout(dismiss, 2500);
+        return;
+      }
+      // Granular error reasons from #129a's activate(): translate each
+      // into actionable user-facing copy. None re-enable Switch (the
+      // condition won't change without user action elsewhere) — Cancel
+      // re-enables to let them dismiss and act in Settings.
+      const reason = (r.data && r.data.reason) || '';
+      const errMsg = (r.data && r.data.error) || 'Could not switch to local.';
+      if (reason === 'disabled') {
+        status.innerHTML = 'Local fallback is off. Enable it in <strong>Settings → Providers → Local fallback</strong>, then try again.';
+      } else if (reason === 'missing-model') {
+        status.innerHTML = 'Local model not downloaded yet. Enable local fallback in <strong>Settings → Providers</strong> to start the ~2.5 GB download.';
+      } else if (reason === 'unhealthy') {
+        status.textContent = 'Local model is warming up. Try again in a few seconds.';
+        switchBtn.disabled = false;  // unhealthy may resolve quickly
+      } else {
+        status.textContent = errMsg;
+      }
+      cancelBtn.disabled = false;
+    });
+  }
+
   async function maybeReactToError(detail) {
     if (sessionStorage.getItem(MODAL_DISMISSED)) return;
     if (!detail || !ELIGIBLE_TYPES.has(detail.type)) return;
@@ -281,6 +355,15 @@
     // expects banner) silently never started polling.
     window.addEventListener('fitb:fallback-enabled', () => {
       startRecoveryPolling();
+    });
+
+    // FITB#128: provider-not-responding timeout. messages.js arms a timer
+    // when the SSE stream opens; if no event arrives within N seconds it
+    // fires this event. Different modal variant from the eligibility one
+    // (different copy + Switch-now action that calls #129a's activate
+    // endpoint), but reuses the same _modalOpen guard so they don't stack.
+    window.addEventListener('fitb:provider-timeout', () => {
+      showTimeoutModal();
     });
 
     // Decide whether to start recovery polling for the steady-state case

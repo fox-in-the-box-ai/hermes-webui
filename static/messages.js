@@ -644,6 +644,61 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // the fixes below (_streamFinalized guard + cancelAnimationFrame in the
     // terminal handlers) address it without needing a reset here.
 
+    // FITB#128: provider-not-responding timeout. If no SSE event arrives
+    // within the configured window (default 10s, override via
+    // localStorage.fitb.timeout_modal_ms), surface a modal offering to
+    // switch to a local model. The state machine has three states:
+    //   armed   → timer running, no event yet
+    //   fired   → timer fired, modal is up
+    //   cleared → first event arrived (or stream closed)
+    // First event in `armed` clears silently; first event in `fired`
+    // dispatches `fitb:provider-resumed` so the modal auto-dismisses.
+    let _ptState = 'armed';
+    const _ptMs = (function(){
+      const v = parseInt(localStorage.getItem('fitb.timeout_modal_ms') || '10000', 10);
+      return isFinite(v) && v > 0 ? v : 10000;
+    })();
+    let _ptTimer = setTimeout(() => {
+      if (_ptState !== 'armed') return;
+      _ptState = 'fired';
+      window.dispatchEvent(new CustomEvent('fitb:provider-timeout'));
+    }, _ptMs);
+    const _ptOnFirstEvent = () => {
+      if (_ptState === 'cleared') return;
+      if (_ptTimer) { clearTimeout(_ptTimer); _ptTimer = null; }
+      if (_ptState === 'fired') {
+        // Modal is up; provider just woke up. Tell the modal to dismiss.
+        window.dispatchEvent(new CustomEvent('fitb:provider-resumed'));
+      }
+      _ptState = 'cleared';
+    };
+    // Wrap addEventListener so every subsequently-registered listener
+    // also resets the timeout state on first invocation. Done this way
+    // (vs editing every named handler below) to keep the patch surgical
+    // and avoid drifting from upstream Hermes WebUI when we sync.
+    const _origAdd = source.addEventListener.bind(source);
+    source.addEventListener = function(type, listener, opts){
+      const wrapped = function(ev){
+        _ptOnFirstEvent();
+        return listener.call(this, ev);
+      };
+      return _origAdd(type, wrapped, opts);
+    };
+    // EventSource error/close: clear timer too — no point dispatching a
+    // "provider not responding" modal after the connection itself died
+    // (the apperror handler already covers that path via #stream-error).
+    _origAdd('error', () => { _ptOnFirstEvent(); });
+    // Wrap source.close() so external close paths (new message starting
+    // mid-stream, session navigation, tab unload) also clear the timer.
+    // Without this, a stale timer from a closed source could fire 10s
+    // after the user has moved on, popping a confusing modal during
+    // their *next* request.
+    const _origClose = source.close.bind(source);
+    source.close = function(){
+      _ptOnFirstEvent();
+      return _origClose.apply(this, arguments);
+    };
+
     source.addEventListener('token',e=>{
       if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
