@@ -911,6 +911,18 @@
                 </div>
                 <button class="btn-tiny" onclick="refreshOllamaLocal()" title="Re-probe local Ollama" data-i18n-title="ollama_refresh">Refresh</button>
               </div>
+              <!-- FITB#109: custom Ollama URL (NAS, LAN server) -->
+              <details style="margin-top:10px;font-size:12px">
+                <summary style="cursor:pointer;color:var(--muted);font-size:11px">Custom Ollama URL (advanced)</summary>
+                <div style="margin-top:8px;font-size:11px;color:var(--muted);margin-bottom:6px">
+                  Point Fox at an Ollama server elsewhere on your network — a NAS, another laptop, anything reachable. Leave blank to auto-detect a local install.
+                </div>
+                <div style="display:flex;gap:6px;align-items:stretch">
+                  <input type="text" id="ollamaCustomUrl" placeholder="http://192.168.1.50:11434" autocomplete="off" spellcheck="false" style="flex:1;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">
+                  <button class="btn-tiny" onclick="saveOllamaCustomUrl()" data-i18n-title="ollama_apply_url">Apply</button>
+                </div>
+                <div id="ollamaCustomUrlStatus" style="font-size:11px;color:var(--muted);margin-top:6px;min-height:14px"></div>
+              </details>
               <div id="ollamaLocalDisk" style="margin-top:8px;font-size:11px;color:var(--muted);display:none"></div>
               <div id="ollamaLocalProgress" style="margin-top:10px;display:none;padding:10px;border:1px solid var(--border2);border-radius:6px;background:var(--bg)"></div>
               <div id="ollamaLocalModels" style="margin-top:10px;display:none"></div>
