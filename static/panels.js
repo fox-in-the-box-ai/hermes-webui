@@ -3368,6 +3368,28 @@ function _tsMessage(msg){
   if(el) el.textContent = msg || '';
 }
 
+// FITB#139: render the auth URL as a visible clickable link in the
+// Tailscale tile. Required for browsers that silently block window.open
+// (Safari's default popup blocker, restrictive corporate setups). Renders
+// into a dedicated #tsAuthLink container so the regular #tsMessage text
+// flow is undisturbed.
+function _tsRenderAuthLink(url){
+  const el = document.getElementById('tsAuthLink');
+  if(!el) return;
+  if(!url){
+    el.innerHTML = '';
+    el.style.display = 'none';
+    return;
+  }
+  // Escape for href (URL is from the backend, not user-controlled at this
+  // point, but still belt-and-suspenders).
+  const safe = String(url).replace(/[&<>"']/g, (c) => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+  ));
+  el.innerHTML = `→ <a href="${safe}" target="_blank" rel="noopener" style="color:var(--accent,#3aa);text-decoration:underline">Click to authenticate Tailscale</a>`;
+  el.style.display = '';
+}
+
 async function loadTailscaleConnection(){
   // Best-effort: if the endpoint 404s (older webui), the tile silently
   // renders "Unknown" and stays inert. Catch-all to keep Settings load
@@ -3554,6 +3576,7 @@ let _tsAuthUrlOpened = false;
 function _tsStartPolling(){
   _tsStopPolling();
   _tsAuthUrlOpened = false;
+  _tsRenderAuthLink(null);  // FITB#139: clear any stale link from a prior attempt
 
   const tick = async () => {
     let progress;
@@ -3564,22 +3587,32 @@ function _tsStartPolling(){
       return;
     }
 
-    // First time we see an auth URL, open it in a new tab. Subsequent ticks
-    // don't re-open — that would spam tabs every 2s.
+    // First time we see an auth URL, open it in a new tab AND surface
+    // the link in the tile. Subsequent ticks don't re-open — that would
+    // spam tabs every 2s — but the link stays visible until the user
+    // either authenticates or dismisses.
+    //
+    // FITB#139: window.open() can be silently blocked (Safari default
+    // popup blocker, browsers in cross-origin restricted contexts).
+    // Always show the URL as a clickable link as the canonical path;
+    // the auto-open is a bonus, not a requirement. Detecting blocked
+    // popups via window.open returning null is unreliable across
+    // browsers, so we just always surface the link.
     if(!_tsAuthUrlOpened && progress.auth_url){
       _tsAuthUrlOpened = true;
-      _tsMessage('Opening browser to complete Tailscale auth…');
       try{ window.open(progress.auth_url, '_blank', 'noopener'); }catch(e){}
+      _tsRenderAuthLink(progress.auth_url);
     }
 
     if(progress.state === 'awaiting-auth'){
-      _tsMessage('Waiting for you to finish auth in the browser tab…');
+      _tsMessage('Waiting for you to finish auth — click the link above if no tab opened.');
     }else if(progress.state === 'starting'){
       _tsMessage('Starting Tailscale…');
     }
 
     if(progress.state === 'running'){
       _tsMessage('Connected.');
+      _tsRenderAuthLink(null);  // FITB#139: clear the auth link on success
       const connectBtn = document.getElementById('tsConnectBtn');
       if(connectBtn) connectBtn.disabled = false;
       _tsStopPolling();
@@ -3588,6 +3621,7 @@ function _tsStartPolling(){
     }
     if(progress.state === 'failed'){
       _tsMessage(progress.error || 'Tailscale connection failed.');
+      _tsRenderAuthLink(null);  // FITB#139: clear the auth link on failure
       const connectBtn = document.getElementById('tsConnectBtn');
       if(connectBtn) connectBtn.disabled = false;
       _tsStopPolling();
