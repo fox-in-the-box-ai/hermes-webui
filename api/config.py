@@ -216,8 +216,19 @@ def get_config() -> dict:
 
 
 def reload_config() -> None:
-    """Reload config.yaml from the active profile's directory."""
-    global _cfg_mtime
+    """Reload config.yaml from the active profile's directory.
+
+    FITB#138: also invalidates the in-memory `_available_models_cache`.
+    Any caller that calls reload_config() has just changed the config
+    (e.g. api/ollama.py:use_model writes cfg.model and reloads). Without
+    in-memory cache eviction, /api/models continues returning stale
+    groups for up to 5 minutes after a provider switch — which is why
+    the chat model picker missed Ollama models after clicking "Use" in
+    Settings. The pre-existing _delete_models_cache_on_disk() below
+    only addresses the persisted on-disk cache; the in-memory cache
+    was independent and not invalidated by any config write.
+    """
+    global _cfg_mtime, _available_models_cache, _available_models_cache_ts
     with _cfg_lock:
         _cfg_cache.clear()
         config_path = _get_config_path()
@@ -244,6 +255,10 @@ def reload_config() -> None:
         # still hits the fast path without a cold run.
         if _old_cfg_mtime != 0.0:
             _delete_models_cache_on_disk()
+            # FITB#138: also evict the in-memory cache. Same gating as the
+            # on-disk delete: only on actual changes, not first-ever load.
+            _available_models_cache = None
+            _available_models_cache_ts = 0.0
 
 
 def _load_yaml_config_file(config_path: Path) -> dict:

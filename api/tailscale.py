@@ -274,9 +274,30 @@ def get_status() -> dict[str, Any]:
     with _up_lock:
         serve_snap = (_up_state.get("serve_state", "idle"),
                       _up_state.get("serve_error", ""))
+
+    # FITB#140: if tailscaled is Running but serve_state is still "idle"
+    # (we've never attempted to configure Serve for this Running session),
+    # trigger a one-shot auto-config. This covers the path where the user
+    # authenticated AFTER the entrypoint's 15-min boot window expired AND
+    # the webui's start_up didn't witness the Running transition (e.g.
+    # the tailscale up subprocess exited before _attempt_configure_serve
+    # was called, or the user authed externally via `docker exec`).
+    # Idempotent: configure_serve / _attempt_configure_serve update
+    # serve_state on completion, so subsequent get_status calls become
+    # no-ops once serve_state is "ok" or "error".
+    backend_state = s.get("BackendState") or "Unknown"
+    if backend_state == "Running" and serve_snap[0] == "idle":
+        try:
+            _attempt_configure_serve()
+            with _up_lock:
+                serve_snap = (_up_state.get("serve_state", "idle"),
+                              _up_state.get("serve_error", ""))
+        except Exception:
+            logger.debug("Auto-configure Serve from get_status failed", exc_info=True)
+
     return {
         "available": True,
-        "backend_state": s.get("BackendState") or "Unknown",
+        "backend_state": backend_state,
         "self": {
             "hostname": self_node.get("HostName") or "",
             "dns_name": dns,
