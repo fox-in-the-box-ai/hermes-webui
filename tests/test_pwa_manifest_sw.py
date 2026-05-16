@@ -196,9 +196,7 @@ class TestIndexHtmlIntegration:
         # Versioned shell assets must include the cache version query.
         for asset in (
             "style.css",
-            "fox-in-the-box.css",
             "boot.js",
-            "fox-in-the-box.js",
             "ui.js",
             "messages.js",
             "sessions.js",
@@ -208,7 +206,6 @@ class TestIndexHtmlIntegration:
             "i18n.js",
             "workspace.js",
             "terminal.js",
-            "onboarding-preview.js",
         ):
             # Either inline `?v=__CACHE_VERSION__` or via the VQ constant
             # produces a URL string the cache lookup can match.

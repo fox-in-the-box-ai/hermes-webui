@@ -3108,7 +3108,7 @@ function _messageHasReasoningPayload(m){
 }
 function _assistantRoleHtml(tsTitle=''){
   const _bn=window._botName||'Hermes';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><img class="role-icon assistant app-avatar" src="static/fox_avatar_cropped.jpg" alt="${esc(_bn)}" width="20" height="20" decoding="async"><span style="font-size:12px">${esc(_bn)}</span></div>`;
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><img class="role-icon assistant app-avatar" src="extensions/images/fox_avatar_cropped.jpg" alt="${esc(_bn)}" width="20" height="20" decoding="async"><span style="font-size:12px">${esc(_bn)}</span></div>`;
 }
 function _createAssistantTurn(tsTitle=''){
   const row=document.createElement('div');
