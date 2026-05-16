@@ -24,9 +24,7 @@ const VQ = '?v=__CACHE_VERSION__';
 const SHELL_ASSETS = [
   './',
   './static/style.css' + VQ,
-  './static/fox-in-the-box.css' + VQ,
   './static/boot.js' + VQ,
-  './static/fox-in-the-box.js' + VQ,
   './static/ui.js' + VQ,
   './static/messages.js' + VQ,
   './static/sessions.js' + VQ,
@@ -36,12 +34,8 @@ const SHELL_ASSETS = [
   './static/i18n.js' + VQ,
   './static/workspace.js' + VQ,
   './static/terminal.js' + VQ,
-  './static/onboarding-preview.js' + VQ,
   './static/favicon.svg',
   './static/favicon-32.png',
-  './static/fox_avatar_cropped.jpg',
-  './static/fonts/Sora[wght].woff2',
-  './static/fonts/Manrope[wght].woff2',
   './manifest.json',
 ];
 
