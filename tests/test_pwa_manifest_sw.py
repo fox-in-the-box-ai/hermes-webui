@@ -7,6 +7,8 @@ Covers:
   which is broken — Promise objects are always truthy in `||` checks, so the
   fallback Response would never be used)
 - /manifest.json, /manifest.webmanifest, /sw.js routes serve correct Content-Type
+- index.html + ui.js reference Fox overlay assets via the relative `extensions/`
+  URL prefix (post-Phase-2 of the v0.6.0 upstream-separation migration)
 """
 import json
 import re
@@ -18,6 +20,7 @@ MANIFEST = ROOT / "static" / "manifest.json"
 SW = ROOT / "static" / "sw.js"
 INDEX = ROOT / "static" / "index.html"
 ROUTES = ROOT / "api" / "routes.py"
+UI_JS = ROOT / "static" / "ui.js"
 
 
 class TestManifest:
@@ -257,3 +260,69 @@ class TestIndexHtmlIntegration:
         assert "apple-mobile-web-app-capable" in src, (
             "index.html should include Apple PWA meta tags for iOS home-screen support"
         )
+
+
+class TestFoxOverlayExtensionRefs:
+    """Phase 2 of v0.6.0 migration moved Fox-only assets out of static/ to be
+    served via upstream's HERMES_WEBUI_EXTENSION_DIR mechanism at /extensions/.
+
+    These tests catch accidental reverts that would re-introduce `static/...`
+    references to assets that no longer live in this fork's static/ tree.
+
+    URL form MUST stay relative (`extensions/...`, no leading slash) per the
+    line-16 comment in static/index.html about subpath-mount support.
+    """
+
+    _MOVED_ASSETS = (
+        "static/fox-in-the-box.css",
+        "static/fox-in-the-box.js",
+        "static/fox_avatar_cropped.jpg",
+        "static/onboarding-preview.js",
+        "static/fallback-polish.js",
+        "static/hostname-prompt.js",
+        "static/fonts/Manrope[wght].woff2",
+        "static/fonts/Sora[wght].woff2",
+    )
+
+    def test_index_avatar_uses_extensions_url(self):
+        src = INDEX.read_text(encoding="utf-8")
+        assert "extensions/images/fox_avatar_cropped.jpg" in src, (
+            "index.html must reference fox_avatar via the relative "
+            "`extensions/images/fox_avatar_cropped.jpg` URL — overlay-served"
+        )
+
+    def test_ui_js_assistant_avatar_uses_extensions_url(self):
+        src = UI_JS.read_text(encoding="utf-8")
+        assert "extensions/images/fox_avatar_cropped.jpg" in src, (
+            "ui.js _assistantRoleHtml must reference the avatar via "
+            "`extensions/images/fox_avatar_cropped.jpg` (relative path)"
+        )
+
+    def test_no_leftover_static_references_in_index(self):
+        src = INDEX.read_text(encoding="utf-8")
+        for path in self._MOVED_ASSETS:
+            assert path not in src, (
+                f"index.html must not reference moved asset {path!r} — "
+                "use the overlay-served `extensions/...` URL instead"
+            )
+
+    def test_no_leftover_static_references_in_ui_js(self):
+        src = UI_JS.read_text(encoding="utf-8")
+        for path in self._MOVED_ASSETS:
+            assert path not in src, (
+                f"ui.js must not reference moved asset {path!r}"
+            )
+
+    def test_extension_paths_are_relative(self):
+        """Subpath-mount safety: `extensions/...` references must not start
+        with a leading slash. See static/index.html line 16."""
+        for source_file in (INDEX, UI_JS):
+            src = source_file.read_text(encoding="utf-8")
+            # Look for absolute `/extensions/` in src/href attributes — the
+            # extensions.py-injected tags in the Dockerfile use absolute URLs
+            # (different code path), but in-HTML img/link refs must be relative.
+            for absolute in ('src="/extensions/', "src='/extensions/", 'href="/extensions/', "href='/extensions/"):
+                assert absolute not in src, (
+                    f"{source_file.name} contains absolute `{absolute}...` ref — "
+                    "Fox overlay refs must stay relative for subpath-mount support"
+                )

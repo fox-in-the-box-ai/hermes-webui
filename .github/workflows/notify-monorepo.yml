@@ -1,9 +1,15 @@
 name: Notify Monorepo on Push
 
+# Push trigger PAUSED for the Fox in the Box v0.6.0 upstream-separation
+# migration (fox-in-the-box-ai/fox-in-the-box#155). The companion monorepo
+# workflow `.github/workflows/sync-submodules.yml` is paused symmetrically
+# for the same reason — auto-bumping the submodule pointer mid-migration
+# would whipsaw the pin while phases 2-7 are in flight.
+#
+# Restored when v0.6.0 ships and the submodules re-point at virgin upstream
+# (Phase 8). For manual dispatch during the migration, use workflow_dispatch.
 on:
-  push:
-    branches:
-      - master
+  workflow_dispatch:
 
 jobs:
   notify:
