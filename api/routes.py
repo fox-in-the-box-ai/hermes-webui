@@ -1647,11 +1647,6 @@ def handle_get(handler, parsed) -> bool:
         from api.onboarding import handle_setup_welcome
         return j(handler, handle_setup_welcome(handler))
 
-    # ── Tailscale hostname (GET) — issue #44 ──
-    if parsed.path == "/api/settings/hostname":
-        from api.hostname import handle_get_hostname
-        return j(handler, handle_get_hostname(handler))
-
     if parsed.path == "/api/models":
         return j(handler, get_available_models())
 
@@ -2330,18 +2325,6 @@ def handle_post(handler, parsed) -> bool:
         from api.onboarding import handle_setup_skip
         result = handle_setup_skip(handler, body)
         return j(handler, result)
-
-    # ── Tailscale hostname (POST) — issue #44 ──
-    if parsed.path == "/api/settings/hostname":
-        from api.hostname import handle_set_hostname
-        result = handle_set_hostname(handler, body)
-        return j(handler, result, status=200 if result.get("ok") else 400)
-
-    # ── Post-wizard hostname-prompt dismiss — issue #68 ──
-    if parsed.path == "/api/settings/hostname/dismiss-prompt":
-        from api.hostname import handle_dismiss_hostname_prompt
-        result = handle_dismiss_hostname_prompt(handler, body)
-        return j(handler, result, status=200 if result.get("ok") else 400)
 
     if parsed.path == "/api/session/new":
         try:
