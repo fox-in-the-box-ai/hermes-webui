@@ -199,36 +199,15 @@ def _get_config_path() -> Path:
 
 
 def get_config() -> dict:
-    """Return the cached config dict, loading from disk if needed or if file changed."""
+    """Return the cached config dict, loading from disk if needed."""
     if not _cfg_cache:
         reload_config()
-        return _cfg_cache
-
-    try:
-        if _get_config_path().stat().st_mtime != _cfg_mtime:
-            with _cfg_lock:
-                if _get_config_path().stat().st_mtime != _cfg_mtime:
-                    reload_config()
-    except OSError:
-        pass  # File disappeared or permission error; keep using cache
-
     return _cfg_cache
 
 
 def reload_config() -> None:
-    """Reload config.yaml from the active profile's directory.
-
-    FITB#138: also invalidates the in-memory `_available_models_cache`.
-    Any caller that calls reload_config() has just changed the config
-    (e.g. api/ollama.py:use_model writes cfg.model and reloads). Without
-    in-memory cache eviction, /api/models continues returning stale
-    groups for up to 5 minutes after a provider switch — which is why
-    the chat model picker missed Ollama models after clicking "Use" in
-    Settings. The pre-existing _delete_models_cache_on_disk() below
-    only addresses the persisted on-disk cache; the in-memory cache
-    was independent and not invalidated by any config write.
-    """
-    global _cfg_mtime, _available_models_cache, _available_models_cache_ts
+    """Reload config.yaml from the active profile's directory."""
+    global _cfg_mtime
     with _cfg_lock:
         _cfg_cache.clear()
         config_path = _get_config_path()
@@ -255,10 +234,6 @@ def reload_config() -> None:
         # still hits the fast path without a cold run.
         if _old_cfg_mtime != 0.0:
             _delete_models_cache_on_disk()
-            # FITB#138: also evict the in-memory cache. Same gating as the
-            # on-disk delete: only on actual changes, not first-ever load.
-            _available_models_cache = None
-            _available_models_cache_ts = 0.0
 
 
 def _load_yaml_config_file(config_path: Path) -> dict:
@@ -2330,33 +2305,6 @@ _SETTINGS_DEFAULTS = {
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
     "busy_input_mode": "queue",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
-    # FITB: opt-in flag for local AI fallback (#9). Toggling ON triggers a
-    # one-time GGUF download (~2.5 GB) and starts a supervisord-managed
-    # llama-server. When ON and ready, transient remote-provider failures
-    # silently retry through the local model. Default OFF; user enables
-    # explicitly in Settings → Providers → Local fallback.
-    "local_fallback_enabled": False,
-    # FITB: tracks whether the post-wizard hostname prompt (#68) has been
-    # shown. Once true, the prompt never re-fires — set on Save or Skip in
-    # the modal, or implicitly when the user sets a hostname in Settings.
-    "hostname_prompted": False,
-    # FITB: power-user Tailscale flags surfaced in the Settings → Network
-    # advanced accordion (#96 phase 2). Backend's _build_up_argv() already
-    # accepts these; persisting them here lets the UI pre-populate on
-    # revisit and the /up endpoint merge them with body opts. Empty-string
-    # defaults preserve current Tailscale defaults (login.tailscale.com,
-    # no advertise, no exit node). accept_dns defaults TRUE because
-    # Tailscale itself defaults true and most users want MagicDNS.
-    "tailscale_login_server": "",
-    "tailscale_advertise_routes": "",
-    "tailscale_advertise_tags": "",
-    "tailscale_accept_routes": False,
-    "tailscale_accept_dns": True,
-    "tailscale_exit_node": "",
-    # FITB#109: custom Ollama base URL. Empty means "auto-detect" (probe
-    # host.docker.internal then localhost). Validated and normalized at
-    # /api/settings save time by api/ollama.validate_custom_ollama_url.
-    "ollama_custom_url": "",
 }
 _SETTINGS_LEGACY_DROP_KEYS = {"assistant_language", "bubble_layout", "default_model"}
 _SETTINGS_THEME_VALUES = {"light", "dark", "system"}
@@ -2471,47 +2419,13 @@ _SETTINGS_BOOL_KEYS = {
     "show_thinking",
     "simplified_tool_calling",
     "api_redact_enabled",
-    "local_fallback_enabled",
-    "hostname_prompted",
-    "tailscale_accept_routes",
-    "tailscale_accept_dns",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")
 
 
 def save_settings(settings: dict) -> dict:
-    """Save settings to disk. Returns the merged settings. Ignores unknown keys.
-
-    QA fix: validate the Tailscale power-user fields before they hit
-    settings.json. _build_up_argv re-validates as belt-and-suspenders, but
-    rejecting at this gate means a malformed value never gets persisted in
-    the first place.
-    """
-    try:
-        from api.tailscale import validate_settings_dict as _ts_validate
-        ts_err = _ts_validate(settings)
-        if ts_err:
-            raise ValueError(f"Tailscale setting rejected: {ts_err}")
-    except ImportError:
-        # Tailscale module not present in some test contexts — skip the gate.
-        pass
-    # FITB#109: validate ollama_custom_url at the save gate. Same
-    # belt-and-suspenders pattern as Tailscale fields — probe-time
-    # validation re-runs as defense in depth, but rejecting at save
-    # means malformed values never persist in settings.json.
-    _ollama_url_changed = False
-    if "ollama_custom_url" in settings:
-        try:
-            from api.ollama import validate_custom_ollama_url
-            ok, normalized_or_err = validate_custom_ollama_url(settings["ollama_custom_url"])
-            if not ok:
-                raise ValueError(f"Ollama setting rejected: {normalized_or_err}")
-            # Persist the normalized form (trailing slash stripped, etc.)
-            settings["ollama_custom_url"] = normalized_or_err
-            _ollama_url_changed = True
-        except ImportError:
-            pass
+    """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
     current = load_settings()
     pending_theme = current.get("theme")
     pending_skin = current.get("skin")
@@ -2547,26 +2461,9 @@ def save_settings(settings: dict) -> dict:
                 not isinstance(v, str) or not _SETTINGS_LANG_RE.match(v)
             ):
                 continue
-            # Coerce bool keys. QA fix: bool("false") is True in Python —
-            # a curl POST with `{"hostname_prompted":"false"}` would silently
-            # flip the flag to True. Accept native booleans, JSON-stringified
-            # booleans, and obvious truthy/falsy strings; reject other types
-            # by leaving the prior value intact.
+            # Coerce bool keys
             if k in _SETTINGS_BOOL_KEYS:
-                if isinstance(v, bool):
-                    pass
-                elif isinstance(v, str):
-                    s = v.strip().lower()
-                    if s in ("true", "1", "yes", "on"):
-                        v = True
-                    elif s in ("false", "0", "no", "off", ""):
-                        v = False
-                    else:
-                        continue  # unrecognized — skip this key
-                elif isinstance(v, (int, float)):
-                    v = bool(v)
-                else:
-                    continue  # unsupported type — skip this key
+                v = bool(v)
             current[k] = v
     theme_value = pending_theme
     skin_value = pending_skin
@@ -2589,15 +2486,6 @@ def save_settings(settings: dict) -> dict:
     global DEFAULT_WORKSPACE
     if "default_workspace" in current:
         DEFAULT_WORKSPACE = resolve_default_workspace(current["default_workspace"])
-    # FITB#109: invalidate the Ollama probe cache so the user sees the
-    # detection result against the new URL on the next /api/ollama/status
-    # call instead of waiting up to 10s for the cache to expire naturally.
-    if _ollama_url_changed:
-        try:
-            from api.ollama import clear_cache as _clear_ollama_cache
-            _clear_ollama_cache()
-        except Exception:
-            pass
     current["default_model"] = get_effective_default_model()
     return current
 
