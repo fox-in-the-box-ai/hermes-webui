@@ -1652,15 +1652,6 @@ def handle_get(handler, parsed) -> bool:
         from api.hostname import handle_get_hostname
         return j(handler, handle_get_hostname(handler))
 
-    # ── Local Ollama (GET) — issue #66 ──
-    if parsed.path == "/api/ollama/status":
-        from api.ollama import handle_get_status
-        return j(handler, handle_get_status(handler))
-
-    if parsed.path == "/api/ollama/models":
-        from api.ollama import handle_get_models
-        return j(handler, handle_get_models(handler))
-
     # ── Local model download manager (issue #10) ──
     # Distinct prefix from /api/models (the chat-input model picker) to
     # avoid collision. /api/local-models/* is the on-disk model store.
@@ -2384,33 +2375,6 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/settings/hostname/dismiss-prompt":
         from api.hostname import handle_dismiss_hostname_prompt
         result = handle_dismiss_hostname_prompt(handler, body)
-        return j(handler, result, status=200 if result.get("ok") else 400)
-
-    # ── Local Ollama (POST) — issues #66, #67 ──
-    if parsed.path == "/api/ollama/refresh":
-        from api.ollama import handle_post_refresh
-        return j(handler, handle_post_refresh(handler))
-
-    if parsed.path == "/api/ollama/use-model":
-        from api.ollama import handle_post_use_model
-        result = handle_post_use_model(handler, body)
-        return j(handler, result, status=200 if result.get("ok") else 400)
-
-    # SSE-streamed pull (#67). Stream ownership lives entirely inside
-    # stream_pull — once it sends headers, no further response shaping
-    # from this routing layer. Returns True so the dispatcher knows the
-    # request was handled and doesn't fall through to 404.
-    if parsed.path == "/api/ollama/pull":
-        from api.ollama import stream_pull
-        stream_pull(handler, body.get("model", ""))
-        return True
-
-    # POST (not DELETE) for symmetry with the rest of our mutation
-    # endpoints — hermes-webui's request dispatcher doesn't route DELETE
-    # at the framework level. Body shape: {"model": "<name>"}. (#67)
-    if parsed.path == "/api/ollama/delete":
-        from api.ollama import delete_model
-        result = delete_model(body.get("model", ""))
         return j(handler, result, status=200 if result.get("ok") else 400)
 
     # ── Local AI fallback toggles (#9) ──
