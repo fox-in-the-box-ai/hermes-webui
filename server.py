@@ -4,95 +4,18 @@ Thin routing shell: imports Handler, delegates to api/routes.py, runs server.
 All business logic lives in api/*.
 """
 import logging
-import os
 import socket
-import subprocess
 import sys
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-def _ensure_active_branch() -> None:
-    """Switch to local-patches on startup (if available), then re-exec.
-
-    This keeps runtime behavior consistent after self-update pulls that refresh
-    the default branch first and then replay local patches.
-    """
-    if os.environ.get('HERMES_WEBUI_SKIP_BRANCH_SWITCH', '').strip().lower() in ('1', 'true', 'yes'):
-        return
-    desired = os.environ.get('HERMES_WEBUI_ACTIVE_BRANCH', 'local-patches').strip()
-    if not desired:
-        return
-    # Loop guard for failed/partial switches.
-    if os.environ.get('HERMES_WEBUI_BRANCH_SWITCHED') == '1':
-        return
-    repo = Path(__file__).resolve().parent
-    if not (repo / '.git').exists():
-        return
-    if (repo / '.git' / 'rebase-merge').exists() or (repo / '.git' / 'rebase-apply').exists():
-        return
-    try:
-        cur = subprocess.run(
-            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        current = (cur.stdout or '').strip() if cur.returncode == 0 else ''
-        if not current or current == desired:
-            return
-        has_desired = subprocess.run(
-            ['git', 'show-ref', '--verify', f'refs/heads/{desired}'],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if has_desired.returncode != 0:
-            return
-        # Never switch branches with a dirty tracked tree.
-        status = subprocess.run(
-            ['git', 'status', '--porcelain', '--untracked-files=no'],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if status.returncode != 0 or (status.stdout or '').strip():
-            print(
-                f'[!!] Startup branch switch skipped: tracked changes present on {current}.',
-                flush=True,
-            )
-            return
-        switched = subprocess.run(
-            ['git', 'checkout', desired],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if switched.returncode != 0:
-            err = (switched.stderr or switched.stdout or '').strip()
-            print(f'[!!] Startup branch switch to {desired} failed: {err}', flush=True)
-            return
-        print(f'[ok] Startup switched branch {current} -> {desired}; reloading process.', flush=True)
-        os.environ['HERMES_WEBUI_BRANCH_SWITCHED'] = '1'
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-    except Exception as e:
-        print(f'[!!] Startup branch switch check failed: {e}', flush=True)
-
-
-_ensure_active_branch()
-
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import j, get_profile_cookie
-from api.onboarding import should_redirect_to_setup, redirect_to_setup
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_get, handle_post
 from api.startup import auto_install_agent_deps, fix_credential_permissions
@@ -144,8 +67,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self._req_t0 = time.time()
-        if should_redirect_to_setup(self.path):
-            return redirect_to_setup(self)
         # Per-request profile context from cookie (issue #798)
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
@@ -164,15 +85,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self._req_t0 = time.time()
-        if should_redirect_to_setup(self.path):
-            return redirect_to_setup(self)
         # Per-request profile context from cookie (issue #798)
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            # ── Auth + normal routing ──────────────────────────────────────────
             if not check_auth(self, parsed): return
             result = handle_post(self, parsed)
             if result is False:
@@ -191,19 +109,6 @@ def main() -> None:
 
     # Fix sensitive file permissions before doing anything else
     fix_credential_permissions()
-
-    # ── #1558 startup self-heal ─────────────────────────────────────────
-    # If a previous process wrote a session JSON with fewer messages than
-    # its .bak (the data-loss shape #1558 produced), restore from the .bak.
-    # Safe to run unconditionally — a clean install is a no-op.
-    try:
-        from api.session_recovery import recover_all_sessions_on_startup
-        result = recover_all_sessions_on_startup(SESSION_DIR)
-        if result.get("restored"):
-            print(f"[recovery] Restored {result['restored']}/{result['scanned']} sessions from .bak (see #1558).", flush=True)
-    except Exception as exc:
-        # Recovery is best-effort; never block server startup.
-        print(f"[recovery] startup recovery failed: {exc}", flush=True)
 
     within_container = False
     # Check for the "/.within_container" file to determine if we're running inside a container; this file is created in the Dockerfile
