@@ -1664,15 +1664,6 @@ def handle_get(handler, parsed) -> bool:
         model_id = parsed.path[len("/api/local-models/"):-len("/progress")]
         return handle_progress_sse(handler, model_id)
 
-    # ── Local AI fallback (#9) ──
-    if parsed.path == "/api/local-fallback/status":
-        from api.local_fallback import handle_get_status
-        return j(handler, handle_get_status(handler))
-
-    if parsed.path == "/api/local-fallback/remote-health":
-        from api.local_fallback import handle_get_remote_health
-        return j(handler, handle_get_remote_health(handler))
-
     if parsed.path == "/api/models":
         return j(handler, get_available_models())
 
@@ -2362,20 +2353,6 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/settings/hostname/dismiss-prompt":
         from api.hostname import handle_dismiss_hostname_prompt
         result = handle_dismiss_hostname_prompt(handler, body)
-        return j(handler, result, status=200 if result.get("ok") else 400)
-
-    # ── Local AI fallback toggles (#9) ──
-    if parsed.path == "/api/local-fallback/enable":
-        from api.local_fallback import handle_post_enable
-        return j(handler, handle_post_enable(handler, body))
-
-    if parsed.path == "/api/local-fallback/disable":
-        from api.local_fallback import handle_post_disable
-        return j(handler, handle_post_disable(handler, body))
-
-    if parsed.path == "/api/local-fallback/activate":
-        from api.local_fallback import handle_post_activate
-        result = handle_post_activate(handler, body)
         return j(handler, result, status=200 if result.get("ok") else 400)
 
     # ── Local model download manager (POST) — issue #10 ──
