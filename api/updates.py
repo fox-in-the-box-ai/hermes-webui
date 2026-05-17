@@ -27,57 +27,6 @@ _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
 
-# Remote to fetch and compare against.  FITB forks both repos under 'fitb-ai';
-# fall back to 'origin' for vanilla installs without a fork remote.
-FORK_REMOTE = 'fitb-ai'
-
-
-def _get_remote(path: Path) -> str:
-    """Return the preferred fetch/compare remote for *path*.
-
-    Uses FORK_REMOTE ('fitb-ai') when it is configured so that update checks
-    track the Fox-in-the-Box fork rather than the NousResearch / nesquena
-    upstream.  Falls back to 'origin' for vanilla installs.
-    """
-    out, ok = _run_git(['remote'], path)
-    if ok and FORK_REMOTE in out.splitlines():
-        return FORK_REMOTE
-    return 'origin'
-
-
-def _branch_exists(path: Path, branch: str) -> bool:
-    """Return True when a local branch ref exists (loose or packed)."""
-    if not branch:
-        return False
-    git_dir = path / '.git'
-    loose_ref = git_dir / 'refs' / 'heads' / branch
-    if loose_ref.exists():
-        return True
-    packed = git_dir / 'packed-refs'
-    if packed.exists():
-        try:
-            needle = f'refs/heads/{branch}'
-            for line in packed.read_text(encoding='utf-8', errors='ignore').splitlines():
-                if line and not line.startswith(('#', '^')) and line.endswith(needle):
-                    return True
-        except Exception:
-            return False
-    return False
-
-
-def _local_patches_branch(path: Path) -> str:
-    """Name of the managed local patch branch."""
-    # Keep this configurable for advanced setups while defaulting to the
-    # convention used by this repo and deployment docs.
-    return 'local-patches'
-
-
-def _should_use_local_patches_flow(path: Path, target: str) -> bool:
-    """Whether webui updates should refresh master then replay local patches."""
-    if target != 'webui':
-        return False
-    return _branch_exists(path, _local_patches_branch(path))
-
 
 def _run_git(args, cwd, timeout=10):
     """Run a git command and return (useful output, ok).
@@ -157,20 +106,18 @@ def _split_remote_ref(ref):
     return remote, branch
 
 
-def _detect_default_branch(path, remote=None):
-    """Detect the default branch on *remote* (e.g. dev/local-patches, main, master)."""
-    if remote is None:
-        remote = _get_remote(path)
-    out, ok = _run_git(['symbolic-ref', f'refs/remotes/{remote}/HEAD'], path)
+def _detect_default_branch(path):
+    """Detect the remote default branch (master or main)."""
+    out, ok = _run_git(['symbolic-ref', 'refs/remotes/origin/HEAD'], path)
     if ok and out:
-        # refs/remotes/fitb-ai/dev/local-patches -> 'local-patches' (last segment)
+        # refs/remotes/origin/master -> master
         return out.split('/')[-1]
-    # Fallback: probe common branch names in preference order
-    for branch in ('dev/local-patches', 'main', 'master'):
-        _, ok = _run_git(['rev-parse', '--verify', f'{remote}/{branch}'], path)
+    # Fallback: try master, then main
+    for branch in ('master', 'main'):
+        _, ok = _run_git(['rev-parse', '--verify', f'origin/{branch}'], path)
         if ok:
             return branch
-    return 'main'
+    return 'master'
 
 
 def _check_repo(path, name):
@@ -178,29 +125,22 @@ def _check_repo(path, name):
     if path is None or not (path / '.git').exists():
         return None
 
-    remote = _get_remote(path)
-
-    # Fetch latest from our fork remote (network call, cached by TTL)
-    _, fetch_ok = _run_git(['fetch', remote, '--quiet'], path, timeout=15)
+    # Fetch latest from origin (network call, cached by TTL)
+    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
     if not fetch_ok:
         return {'name': name, 'behind': 0, 'error': 'fetch failed'}
 
-    # Managed local-patches mode: updates are driven from upstream default
-    # branch, then local patches are replayed on top.
-    if _should_use_local_patches_flow(path, name):
-        compare_ref = f"{remote}/{_detect_default_branch(path, remote)}"
+    # Use the current branch's upstream tracking branch, not the repo default.
+    # This avoids false "N updates behind" alerts when the user is on a feature
+    # branch and master/main has moved forward with unrelated commits.
+    # If no upstream is set (brand-new local branch), fall back to the default branch.
+    upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
+    if ok and upstream:
+        # upstream is like "origin/feat/foo" — use it directly in rev-list
+        compare_ref = upstream
     else:
-        # Use the current branch's upstream tracking branch, not the repo default.
-        # This avoids false "N updates behind" alerts when the user is on a feature
-        # branch and master/main has moved forward with unrelated commits.
-        # If no upstream is set (brand-new local branch), fall back to the default branch.
-        upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
-        if ok and upstream:
-            # upstream is like "fitb-ai/dev/local-patches" — use it directly in rev-list
-            compare_ref = upstream
-        else:
-            branch = _detect_default_branch(path, remote)
-            compare_ref = f'{remote}/{branch}'
+        branch = _detect_default_branch(path)
+        compare_ref = f'origin/{branch}'
 
     # Count commits behind
     out, ok = _run_git(['rev-list', '--count', f'HEAD..{compare_ref}'], path)
@@ -313,9 +253,7 @@ def apply_force_update(target: str) -> dict:
         if path is None or not (path / '.git').exists():
             return {'ok': False, 'message': 'Not a git repository'}
 
-        remote = _get_remote(path)
-
-        _, fetch_ok = _run_git(['fetch', remote, '--quiet'], path, timeout=15)
+        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
         if not fetch_ok:
             return {
                 'ok': False,
@@ -326,8 +264,8 @@ def apply_force_update(target: str) -> dict:
         if ok and upstream:
             compare_ref = upstream
         else:
-            branch = _detect_default_branch(path, remote)
-            compare_ref = f'{remote}/{branch}'
+            branch = _detect_default_branch(path)
+            compare_ref = f'origin/{branch}'
 
         # Discard local modifications then reset to remote HEAD
         _run_git(['checkout', '.'], path)
@@ -372,24 +310,17 @@ def _apply_update_inner(target):
     if path is None or not (path / '.git').exists():
         return {'ok': False, 'message': 'Not a git repository'}
 
-    remote = _get_remote(path)
-    local_patches_mode = _should_use_local_patches_flow(path, target)
-    local_patches = _local_patches_branch(path)
-    if local_patches_mode:
-        default_branch = _detect_default_branch(path, remote)
-        compare_ref = f'{remote}/{default_branch}'
+    # Use the current branch's upstream for pull, matching the behaviour
+    # of _check_repo. Falls back to default branch if no upstream is set.
+    upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
+    if ok and upstream:
+        compare_ref = upstream
     else:
-        # Use the current branch's upstream for pull, matching the behaviour
-        # of _check_repo. Falls back to default branch if no upstream is set.
-        upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
-        if ok and upstream:
-            compare_ref = upstream
-        else:
-            default_branch = _detect_default_branch(path, remote)
-            compare_ref = f'{remote}/{default_branch}'
+        branch = _detect_default_branch(path)
+        compare_ref = f'origin/{branch}'
 
     # Fetch before attempting pull, so the remote ref is current.
-    _, fetch_ok = _run_git(['fetch', remote, '--quiet'], path, timeout=15)
+    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
     if not fetch_ok:
         return {
             'ok': False,
@@ -426,33 +357,17 @@ def _apply_update_inner(target):
             return {'ok': False, 'message': 'Failed to stash local changes'}
         stashed = True
 
-    if local_patches_mode:
-        current_branch, _ = _run_git(['rev-parse', '--abbrev-ref', 'HEAD'], path)
-        if not current_branch:
-            current_branch = local_patches
-        # Refresh upstream default branch first.
-        _, checkout_ok = _run_git(['checkout', default_branch], path)
-        if not checkout_ok:
-            _, checkout_ok = _run_git(['checkout', '-B', default_branch, compare_ref], path)
-        if not checkout_ok:
-            if stashed:
-                _run_git(['stash', 'pop'], path)
-            return {'ok': False, 'message': f'Failed to switch to {default_branch} before update'}
-        pull_out, pull_ok = _run_git(['pull', '--ff-only', remote, default_branch], path, timeout=30)
+    # Pull with ff-only (no merge commits).
+    # Split tracking refs like 'origin/main' into separate remote + branch
+    # arguments — git treats 'origin/main' as a repository name otherwise.
+    remote, branch = _split_remote_ref(compare_ref)
+    pull_args = ['pull', '--ff-only']
+    if remote:
+        pull_args.extend([remote, branch])
     else:
-        # Pull with ff-only (no merge commits).
-        # Split tracking refs like 'origin/main' into separate remote + branch
-        # arguments — git treats 'origin/main' as a repository name otherwise.
-        remote, branch = _split_remote_ref(compare_ref)
-        pull_args = ['pull', '--ff-only']
-        if remote:
-            pull_args.extend([remote, branch])
-        else:
-            pull_args.append(compare_ref)
-        pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
+        pull_args.append(compare_ref)
+    pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
     if not pull_ok:
-        if local_patches_mode:
-            _run_git(['checkout', current_branch], path)
         if stashed:
             _run_git(['stash', 'pop'], path)
 
@@ -464,7 +379,7 @@ def _apply_update_inner(target):
                 'message': (
                     f'The local {target} repo has commits that are not on the remote '
                     'branch, so a fast-forward update is not possible. '
-                    'Run: git -C ' + str(path) + f' fetch {remote} && '
+                    'Run: git -C ' + str(path) + ' fetch origin && '
                     'git -C ' + str(path) + ' reset --hard ' + compare_ref
                 ),
                 'diverged': True,
@@ -480,38 +395,6 @@ def _apply_update_inner(target):
         # Generic fallback — include the raw git output for debugging.
         detail = pull_out.strip()[:300] if pull_out.strip() else '(no output from git)'
         return {'ok': False, 'message': f'Pull failed: {detail}'}
-    if local_patches_mode:
-        # Replay local patches on top of the refreshed default branch.
-        rebase_out, rebase_ok = _run_git(
-            ['rebase', '--onto', default_branch, default_branch, local_patches],
-            path,
-            timeout=60,
-        )
-        if not rebase_ok:
-            _run_git(['rebase', '--abort'], path)
-            _run_git(['checkout', current_branch], path)
-            if stashed:
-                _run_git(['stash', 'pop'], path)
-            detail = rebase_out.strip()[:300] if rebase_out.strip() else '(no output from git)'
-            return {
-                'ok': False,
-                'message': (
-                    f'Updated {default_branch}, but rebasing {local_patches} failed: {detail}. '
-                    f'Resolve with: git -C {path} checkout {local_patches} && git -C {path} rebase {default_branch}'
-                ),
-                'conflict': True,
-            }
-        _, checkout_local_ok = _run_git(['checkout', local_patches], path)
-        if not checkout_local_ok:
-            if stashed:
-                _run_git(['stash', 'pop'], path)
-            return {
-                'ok': False,
-                'message': (
-                    f'Updated {default_branch} and rebased {local_patches}, but failed to switch to '
-                    f'{local_patches}.'
-                ),
-            }
 
     # Pop stash if we stashed
     if stashed:
@@ -542,11 +425,7 @@ def _apply_update_inner(target):
 
     return {
         'ok': True,
-        'message': (
-            f'{target} updated successfully'
-            if not local_patches_mode
-            else f'{target} updated successfully (rebased {local_patches} onto {default_branch} and switched)'
-        ),
+        'message': f'{target} updated successfully',
         'target': target,
         'restart_scheduled': True,
     }
