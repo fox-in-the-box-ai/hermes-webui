@@ -505,41 +505,12 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
     # disrupting active streaming sessions that may be reading config.cfg.
     invalidate_models_cache()
 
-    # Hot-reload the gateway so the new key takes effect without a manual
-    # container restart. Several runtime_provider paths read keys via
-    # ``os.getenv`` directly (OpenRouter, OpenAI), so the gateway's process
-    # env must be refreshed — invalidate_models_cache() alone isn't enough.
-    # Best-effort: silently a no-op when supervisorctl is unavailable
-    # (upstream Hermes / dev environments without supervisord). Fox in the
-    # Box's run-with-env.sh wrapper re-sources both env files on restart.
-    _reload_provider_runtime()
-
     return {
         "ok": True,
         "provider": provider_id,
         "display_name": _PROVIDER_DISPLAY.get(provider_id, provider_id),
         "action": "updated" if api_key else "removed",
     }
-
-
-def _reload_provider_runtime() -> None:
-    """Best-effort restart of the gateway so new env keys take effect.
-
-    Skipped silently outside FITB-style supervisor deployments.
-    """
-    import shutil
-    import subprocess
-
-    if not shutil.which("supervisorctl"):
-        return
-    try:
-        subprocess.run(
-            ["supervisorctl", "-c", "/etc/supervisor/supervisord.conf",
-             "restart", "hermes-gateway"],
-            capture_output=True, timeout=10, check=False,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        logger.warning("Gateway hot-reload failed: %s", exc)
 
 
 def remove_provider_key(provider_id: str) -> dict[str, Any]:
