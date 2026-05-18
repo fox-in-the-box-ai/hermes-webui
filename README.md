@@ -1,3 +1,18 @@
+> ## Archived as of 2026-05-18 — Fox in the Box v0.6.0 upstream-separation migration
+>
+> This was Fox in the Box's downstream fork of `nesquena/hermes-webui`.
+>
+> As of Fox in the Box **v0.6.0** (2026-05-18) this fork is no longer the submodule source. Fox now bundles **virgin upstream** `nesquena/hermes-webui` and layers Fox-specific behavior on top via the **`packages/fox-overlay/`** package in the monorepo.
+>
+> - **Monorepo:** [`fox-in-the-box-ai/fox-in-the-box`](https://github.com/fox-in-the-box-ai/fox-in-the-box)
+> - **Virgin upstream:** [`nesquena/hermes-webui`](https://github.com/nesquena/hermes-webui)
+> - **Migration architecture:** [`docs/architecture/upstream-overlay.md`](https://github.com/fox-in-the-box-ai/fox-in-the-box/blob/main/docs/architecture/upstream-overlay.md)
+> - **Frozen snapshot:** tag [`fitb-overlay-archive-2026-05-18`](https://github.com/fox-in-the-box-ai/hermes-webui/releases/tag/fitb-overlay-archive-2026-05-18) — last commit that was the submodule source.
+>
+> The contents below are the upstream README at the point the fork was frozen, retained for historical reference only. Do not file new issues here; open them on the monorepo.
+
+---
+
 # Hermes Web UI
 
 [Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, that remembers what it learns and gets more capable the longer it runs.
